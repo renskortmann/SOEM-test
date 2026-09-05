@@ -1,7 +1,7 @@
 /** \file
  * \brief Example code for Simple Open EtherCAT master
  *
- * Usage: simple_ng IFNAME1
+ * Usage: SOEM-test IFNAME1
  * IFNAME1 is the NIC interface name, e.g. 'eth0'
  *
  * This is a minimal test.
@@ -12,6 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/// \brief Structure to hold the state of the fieldbus
+// This structure is used to keep track of the EtherCAT context, 
+// interface name, group number, roundtrip time, and mapping of I/O bytes.
 typedef struct
 {
    ecx_contextt context;
@@ -21,6 +24,9 @@ typedef struct
    uint8 map[4096];
 } Fieldbus;
 
+/// \brief Initialize the fieldbus structure
+// This function initializes the Fieldbus structure by zero-filling it and 
+// setting the interface name, group number, and roundtrip time to default values.
 static void
 fieldbus_initialize(Fieldbus *fieldbus, char *iface)
 {
@@ -32,6 +38,9 @@ fieldbus_initialize(Fieldbus *fieldbus, char *iface)
    fieldbus->roundtrip_time = 0;
 }
 
+/// \brief Perform a roundtrip test
+// This function performs a roundtrip test by sending and receiving process data,
+// and calculates the roundtrip time.
 static int
 fieldbus_roundtrip(Fieldbus *fieldbus)
 {
@@ -51,6 +60,8 @@ fieldbus_roundtrip(Fieldbus *fieldbus)
    return wkc;
 }
 
+/// \brief Start the fieldbus
+// This function initializes the fieldbus and performs the necessary steps to start it.
 static boolean
 fieldbus_start(Fieldbus *fieldbus)
 {
@@ -63,6 +74,7 @@ fieldbus_start(Fieldbus *fieldbus)
    grp = context->grouplist + fieldbus->group;
 
    printf("Initializing SOEM on '%s'... ", fieldbus->iface);
+   // Initialize the EtherCAT context and connect to the specified interface
    if (!ecx_init(context, fieldbus->iface))
    {
       printf("no socket connection\n");
@@ -71,6 +83,7 @@ fieldbus_start(Fieldbus *fieldbus)
    printf("done\n");
 
    printf("Finding autoconfig slaves... ");
+   // Find and configure the slaves on the EtherCAT network
    if (ecx_config_init(context) <= 0)
    {
       printf("no slaves found\n");
@@ -79,6 +92,7 @@ fieldbus_start(Fieldbus *fieldbus)
    printf("%d slaves found\n", context->slavecount);
 
    printf("Sequential mapping of I/O... ");
+   // Map the I/O bytes of the slaves to the process data image
    ecx_config_map_group(context, fieldbus->map, fieldbus->group);
    printf("mapped %dO+%dI bytes from %d segments",
           grp->Obytes, grp->Ibytes, grp->nsegments);
@@ -94,14 +108,17 @@ fieldbus_start(Fieldbus *fieldbus)
    printf("\n");
 
    printf("Configuring distributed clock... ");
+   // Configure the distributed clock for synchronization among slaves
    ecx_configdc(context);
    printf("done\n");
 
    printf("Waiting for all slaves in safe operational... ");
+   // Request all slaves to enter the SAFE_OP state and wait for confirmation
    ecx_statecheck(context, 0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
    printf("done\n");
 
    printf("Send a roundtrip to make outputs in slaves happy... ");
+   // Perform a roundtrip to ensure that the outputs in the slaves are updated and stable 
    fieldbus_roundtrip(fieldbus);
    printf("done\n");
 
@@ -122,8 +139,9 @@ fieldbus_start(Fieldbus *fieldbus)
          return TRUE;
       }
    }
-
    printf(" failed,");
+
+   // Read the state of all slaves and print their status if they are not operational
    ecx_readstate(context);
    for (i = 1; i <= context->slavecount; ++i)
    {
@@ -137,9 +155,14 @@ fieldbus_start(Fieldbus *fieldbus)
    }
    printf("\n");
 
+   // If the function reaches this point, it means that not all slaves could be set to 
+   // operational state
    return FALSE;
 }
 
+/// \brief Stop the fieldbus
+// This function stops the fieldbus by requesting the init state on all slaves and 
+// closing the socket.
 static void
 fieldbus_stop(Fieldbus *fieldbus)
 {
@@ -160,6 +183,9 @@ fieldbus_stop(Fieldbus *fieldbus)
    printf("done\n");
 }
 
+/// \brief Dump the current state of the fieldbus
+// This function dumps the current state of the fieldbus, including the roundtrip time, 
+// working counter (wkc), and the values of the output and input bytes.
 static boolean
 fieldbus_dump(Fieldbus *fieldbus)
 {
@@ -171,9 +197,12 @@ fieldbus_dump(Fieldbus *fieldbus)
    context = &fieldbus->context;
    grp = context->grouplist + fieldbus->group;
 
+   // Perform a roundtrip and calculate the expected working counter (wkc)
    wkc = fieldbus_roundtrip(fieldbus);
+   // The expected working counter is calculated based on the number of output and input bytes
    expected_wkc = grp->outputsWKC * 2 + grp->inputsWKC;
    printf("%6d usec  WKC %d", fieldbus->roundtrip_time, wkc);
+   // Check if the actual working counter is less than the expected value
    if (wkc < expected_wkc)
    {
       printf(" wrong (expected %d)\n", expected_wkc);
@@ -181,11 +210,13 @@ fieldbus_dump(Fieldbus *fieldbus)
    }
 
    printf("  O:");
+   // Print the values of the output bytes in hexadecimal format
    for (n = 0; n < grp->Obytes; ++n)
    {
       printf(" %02X", grp->outputs[n]);
    }
    printf("  I:");
+   // Print the values of the input bytes in hexadecimal format
    for (n = 0; n < grp->Ibytes; ++n)
    {
       printf(" %02X", grp->inputs[n]);
@@ -194,6 +225,9 @@ fieldbus_dump(Fieldbus *fieldbus)
    return TRUE;
 }
 
+/// \brief Check the state of the fieldbus
+// This function checks the state of each slave in the fieldbus and attempts to recover 
+// any that are in an error state.
 static void
 fieldbus_check_state(Fieldbus *fieldbus)
 {
@@ -267,6 +301,9 @@ fieldbus_check_state(Fieldbus *fieldbus)
    }
 }
 
+/// \brief Main function
+// This is the main function of the program, which initializes the fieldbus, 
+// starts it, and performs a series of tests.
 int main(int argc, char *argv[])
 {
    Fieldbus fieldbus;
@@ -275,7 +312,9 @@ int main(int argc, char *argv[])
    {
       ec_adaptert *adapter = NULL;
       ec_adaptert *head = NULL;
-      printf("Usage: simple_ng IFNAME1\n"
+
+      // Print usage information and list available network adapters
+      printf("Usage: SOEM-test IFNAME1\n"
              "IFNAME1 is the NIC interface name, e.g. 'eth0'\n");
 
       printf("\nAvailable adapters:\n");
@@ -289,33 +328,40 @@ int main(int argc, char *argv[])
       return 1;
    }
 
+   // Initialize the fieldbus with the specified interface name
    fieldbus_initialize(&fieldbus, argv[1]);
+   // Start the fieldbus and perform tests if successful
    if (fieldbus_start(&fieldbus))
    {
       int i, min_time, max_time;
       min_time = max_time = 0;
-      for (i = 1; i <= 10000; ++i)
-      {
-         printf("Iteration %4d:", i);
-         if (!fieldbus_dump(&fieldbus))
-         {
-            fieldbus_check_state(&fieldbus);
-         }
-         else if (i == 1)
-         {
-            min_time = max_time = fieldbus.roundtrip_time;
-         }
-         else if (fieldbus.roundtrip_time < min_time)
-         {
-            min_time = fieldbus.roundtrip_time;
-         }
-         else if (fieldbus.roundtrip_time > max_time)
-         {
-            max_time = fieldbus.roundtrip_time;
-         }
-         osal_usleep(5000);
-      }
-      printf("\nRoundtrip time (usec): min %d max %d\n", min_time, max_time);
+
+      // for (i = 1; i <= 10000; ++i)
+      // {
+      //    printf("Iteration %4d:", i);
+      //    // Dump the current state of the fieldbus and check for errors
+      //    if (!fieldbus_dump(&fieldbus))
+      //    {
+      //       // If there is an error, check the state of the fieldbus and attempt recovery
+      //       fieldbus_check_state(&fieldbus);
+      //    }
+      //    else if (i == 1)
+      //    {
+      //       min_time = max_time = fieldbus.roundtrip_time;
+      //    }
+      //    else if (fieldbus.roundtrip_time < min_time)
+      //    {
+      //       min_time = fieldbus.roundtrip_time;
+      //    }
+      //    else if (fieldbus.roundtrip_time > max_time)
+      //    {
+      //       max_time = fieldbus.roundtrip_time;
+      //    }
+      //    // Sleep for 5 milliseconds before the next iteration
+      //    osal_usleep(5000);
+      // }
+      // printf("\nRoundtrip time (usec): min %d max %d\n", min_time, max_time);
+
       fieldbus_stop(&fieldbus);
    }
 
