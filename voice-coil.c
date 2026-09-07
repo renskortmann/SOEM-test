@@ -4,7 +4,7 @@
  * Usage: voice-coil IFNAME1
  * IFNAME1 is the NIC interface name, e.g. 'eth0'
  *
- * Runs a 30-second hardware-synchronized control loop commanding
+ * Runs a RUN_DURATION_S-second hardware-synchronized control loop commanding
  * a sine-wave current to a voice-coil motor, logging samples and faults to CSV.
  */
 
@@ -199,6 +199,7 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
       mantissa = (uint8)(cycle_s / 0.001);
       exponent = -3;
    }
+   // Write mantissa and exponent to 60C2.01h and 60C2.02h
    psize = sizeof(mantissa);
    retval += ecx_SDOwrite(context, slave, 0x60C2, 0x01, FALSE, psize, &mantissa, EC_TIMEOUTSAFE);
    psize = sizeof(exponent);
@@ -207,47 +208,58 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
           mantissa, exponent, retval > 0 ? "OK" : "FAILED");
 
    /* Configure RxPDO mapping (1600h): ControlWord + Target Current */
+   // Clear existing mapping by writing 0 to 1600.00h
    psize = 1;
    uint8 zero = 0;
    retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, psize, &zero, EC_TIMEOUTSAFE);
    
+   // Define new mapping entries for 1600h: ControlWord (6040.00h) and Target Current (6071.00h)
    map_1600[0] = 3;
    map_1600[1] = (0x6040 << 16) | (0x00 << 8) | 0x10;
    map_1600[2] = (0x6071 << 16) | (0x00 << 8) | 0x10;
    
+   // Write mapping entries to 1600.01h (1st application object) and 1600.02h (2nd application object)
    for (i = 0; i < 2; i++)
    {
       psize = sizeof(uint32);
       retval += ecx_SDOwrite(context, slave, 0x1600, 0x01 + i, FALSE, psize, 
                              &map_1600[i + 1], EC_TIMEOUTSAFE);
    }
+
+   // Set number of mapped objects to 2 by writing 2 to 1600.00h
    psize = 1;
    uint8 two = 2;
    retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, psize, &two, EC_TIMEOUTSAFE);
    printf("  Configured RxPDO 1600h: ControlWord + Target Current: %s\n", retval > 0 ? "OK" : "FAILED");
 
-   /* Configure TxPDO mapping (1A00h): StatusWord + Actual Current + Current Demand + AI1 raw + AI2 raw */
+   /* Configure TxPDO mapping (1A00h): StatusWord + Actual Current + Target Current + AI1 raw + AI2 raw */
    psize = 1;
+   uint8 zero = 0;
+   // Clear existing mapping by writing 0 to 1A00.00h
    retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, psize, &zero, EC_TIMEOUTSAFE);
    
+   // Define new mapping entries for 1A00h (TxPDO): StatusWord (6041.00h), Actual Current (6077.00h), Target Current (6071.00h), AI1 raw (2022.01h), AI2 raw (2022.02h)
    uint32 map_1a00_ext[6];
    map_1a00_ext[0] = 5;
    map_1a00_ext[1] = (0x6041 << 16) | (0x00 << 8) | 0x10;
    map_1a00_ext[2] = (0x6077 << 16) | (0x00 << 8) | 0x10;
-   map_1a00_ext[3] = (0x2010 << 16) | (0x02 << 8) | 0x10;
+   map_1a00_ext[3] = (0x6071 << 16) | (0x00 << 8) | 0x10;
    map_1a00_ext[4] = (0x2022 << 16) | (0x01 << 8) | 0x10;
    map_1a00_ext[5] = (0x2022 << 16) | (0x02 << 8) | 0x10;
    
+   // Write mapping entries to 1A00.01h (1st application object) through 1A00.05h (5th application object)
    for (i = 0; i < 5; i++)
    {
       psize = sizeof(uint32);
       retval += ecx_SDOwrite(context, slave, 0x1A00, 0x01 + i, FALSE, psize, 
                              &map_1a00_ext[i + 1], EC_TIMEOUTSAFE);
    }
+
+   // Set number of mapped objects to 5 by writing 5 to 1A00.00h (number of mapped objects)
    psize = 1;
    uint8 five = 5;
    retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, psize, &five, EC_TIMEOUTSAFE);
-   printf("  Configured TxPDO 1A00h: StatusWord + Actual Current + Current Demand + AI1/AI2 raw: %s\n", retval > 0 ? "OK" : "FAILED");
+   printf("  Configured TxPDO 1A00h: StatusWord + Actual Current + Target Current + AI1/AI2 raw: %s\n", retval > 0 ? "OK" : "FAILED");
 
    /* Read Maximum Peak Current (20D8.0Ch) for current scaling */
    psize = sizeof(uint32);
@@ -708,7 +720,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    double elapsed_s = 0.0;
    double sine_phase;
    double target_current_A;
-   int16_t target_current_raw;
+   int32_t target_current_raw;
    int wkc;
    int wkc_error_count = 0;
    int cycle_count = 0;
@@ -729,8 +741,8 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       sine_phase = 2.0 * M_PI * SINE_FREQ_HZ * elapsed_s;
       target_current_A = SINE_AMPLITUDE_A * sin(sine_phase);
       
-      /* Convert to raw Int16 (scale: 2^15 / KP) */
-      target_current_raw = (int16_t)round((target_current_A * 32768.0) / fieldbus->kp_amps);
+      /* Convert to raw Int32 (scale: 2^15 / KP) */
+      target_current_raw = (int32_t)round((target_current_A * 32768.0) / fieldbus->kp_amps);
       if (target_current_raw > 32767) target_current_raw = 32767;
       if (target_current_raw < -32768) target_current_raw = -32768;
       
