@@ -19,12 +19,15 @@
 #include <time.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <sched.h>      /* sched_setscheduler, sched_get_priority_max, SCHED_FIFO */
+#include <sys/mman.h>   /* mlockall, MCL_CURRENT, MCL_FUTURE */
+#include <errno.h>      /* strerror(errno) for error messages */
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       1.0  /**< EtherCAT cycle period in milliseconds */
 #define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
-#define SINE_AMPLITUDE_A    1.0  /**< Target current waveform amplitude in Amps */
-#define RUN_DURATION_S      30.0 /**< Total runtime in seconds */
+#define SINE_AMPLITUDE_A    2.0  /**< Target current waveform amplitude in Amps */
+#define RUN_DURATION_S      5.0 /**< Total runtime in seconds */
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 #define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
@@ -47,11 +50,12 @@ typedef struct OSAL_PACKED
    int16_t target_current;   /**< Desired motor current, scaled by KP (DC2 units) */
 } rx_pdo_t;
 
-/** \brief Slave-to-master process data: CiA402 StatusWord, actual current, and analog sensor inputs */
+/** \brief Slave-to-master process data: CiA402 StatusWord, actual current, current demand feedback, and analog sensor inputs */
 typedef struct OSAL_PACKED
 {
    uint16_t statusword;      /**< CiA402 status bits (state machine state + fault bits) */
    int16_t actual_current;   /**< Measured motor current from drive, scaled by KP (DC1 units) */
+   int16_t current_demand;   /**< Drive's internal current demand feedback (2010.02h), DC2 units */
    uint16_t ai1_raw;         /**< Analog Input 1 raw ADC value (0-65535) */
    uint16_t ai2_raw;         /**< Analog Input 2 raw ADC value (0-65535) */
 } tx_pdo_t;
@@ -88,7 +92,10 @@ typedef struct
    double timestamp_s;       /**< Absolute time when sample was acquired */
    uint16_t ai1_raw;         /**< Analog input 1 raw value at this timestamp */
    uint16_t ai2_raw;         /**< Analog input 2 raw value at this timestamp */
+   double target_current_A_sent;     /**< Target current sent by master (before PDO encoding) */
+   double target_current_A_received; /**< Target current as received by slave from 2010.01h (DC2) */
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
+   double current_demand_A;  /**< Drive's reported current demand in Amps at this timestamp (2010.02h decoded) */
 } sample_log_entry_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
@@ -219,32 +226,107 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, psize, &two, EC_TIMEOUTSAFE);
    printf("  Configured RxPDO 1600h: ControlWord + Target Current: %s\n", retval > 0 ? "OK" : "FAILED");
 
-   /* Configure TxPDO mapping (1A00h): StatusWord + Actual Current + AI1 raw + AI2 raw */
+   /* Configure TxPDO mapping (1A00h): StatusWord + Actual Current + Current Demand + AI1 raw + AI2 raw */
    psize = 1;
    retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, psize, &zero, EC_TIMEOUTSAFE);
    
-   map_1a00[0] = 4;
-   map_1a00[1] = (0x6041 << 16) | (0x00 << 8) | 0x10;
-   map_1a00[2] = (0x6077 << 16) | (0x00 << 8) | 0x10;
-   map_1a00[3] = (0x2022 << 16) | (0x01 << 8) | 0x10;
-   map_1a00[4] = (0x2022 << 16) | (0x02 << 8) | 0x10;
+   uint32 map_1a00_ext[6];
+   map_1a00_ext[0] = 5;
+   map_1a00_ext[1] = (0x6041 << 16) | (0x00 << 8) | 0x10;
+   map_1a00_ext[2] = (0x6077 << 16) | (0x00 << 8) | 0x10;
+   map_1a00_ext[3] = (0x2010 << 16) | (0x02 << 8) | 0x10;
+   map_1a00_ext[4] = (0x2022 << 16) | (0x01 << 8) | 0x10;
+   map_1a00_ext[5] = (0x2022 << 16) | (0x02 << 8) | 0x10;
    
-   for (i = 0; i < 4; i++)
+   for (i = 0; i < 5; i++)
    {
       psize = sizeof(uint32);
       retval += ecx_SDOwrite(context, slave, 0x1A00, 0x01 + i, FALSE, psize, 
-                             &map_1a00[i + 1], EC_TIMEOUTSAFE);
+                             &map_1a00_ext[i + 1], EC_TIMEOUTSAFE);
    }
    psize = 1;
-   uint8 four = 4;
-   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, psize, &four, EC_TIMEOUTSAFE);
-   printf("  Configured TxPDO 1A00h: StatusWord + Actual Current + AI1/AI2 raw: %s\n", retval > 0 ? "OK" : "FAILED");
+   uint8 five = 5;
+   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, psize, &five, EC_TIMEOUTSAFE);
+   printf("  Configured TxPDO 1A00h: StatusWord + Actual Current + Current Demand + AI1/AI2 raw: %s\n", retval > 0 ? "OK" : "FAILED");
 
    /* Read Maximum Peak Current (20D8.0Ch) for current scaling */
    psize = sizeof(uint32);
    retval += ecx_SDOread(context, slave, 0x20D8, 0x0C, FALSE, &psize, &kp_raw, EC_TIMEOUTSAFE);
    fieldbus->kp_amps = kp_raw / 10.0;
-   printf("  Read Maximum Peak Current (KP): raw=0x%04X -> %.1f A\n", kp_raw, fieldbus->kp_amps);
+   printf("  Read Maximum Peak Current (KP): raw=0x%08X -> %.1f A\n", kp_raw, fieldbus->kp_amps);
+
+   /* === EXPLORATORY READS: Watchdog & Synchronization Diagnostics === */
+   printf("\n  Diagnostic Reads (Synchronization & Watchdog Configuration):\n");
+
+   /* Read Device Type (1000h) */
+   uint32_t device_type = 0;
+   psize = sizeof(device_type);
+   if (ecx_SDOread(context, slave, 0x1000, 0x00, FALSE, &psize, &device_type, EC_TIMEOUTSAFE) > 0)
+   {
+      printf("    1000h Device Type: 0x%08X", device_type);
+      if ((device_type & 0xFFFF) == 0x0192)
+         printf(" [CiA402 Servo Drive]");
+      printf("\n");
+   }
+
+   /* Read Identity Object (1018h sub-indices) */
+   uint32_t vendor_id = 0, product_code = 0, revision = 0, serial = 0;
+   psize = sizeof(vendor_id);
+   if (ecx_SDOread(context, slave, 0x1018, 0x01, FALSE, &psize, &vendor_id, EC_TIMEOUTSAFE) > 0)
+      printf("    1018.01h Vendor ID: 0x%02X\n", vendor_id);
+   
+   psize = sizeof(product_code);
+   if (ecx_SDOread(context, slave, 0x1018, 0x02, FALSE, &psize, &product_code, EC_TIMEOUTSAFE) > 0)
+      printf("    1018.02h Product Code: 0x%08X\n", product_code);
+   
+   psize = sizeof(revision);
+   if (ecx_SDOread(context, slave, 0x1018, 0x03, FALSE, &psize, &revision, EC_TIMEOUTSAFE) > 0)
+      printf("    1018.03h Revision: 0x%08X\n", revision);
+   
+   psize = sizeof(serial);
+   if (ecx_SDOread(context, slave, 0x1018, 0x04, FALSE, &psize, &serial, EC_TIMEOUTSAFE) > 0)
+      printf("    1018.04h Serial Number: 0x%08X\n", serial);
+
+   /* Read Sync Manager Communication Type (1C00h) */
+   uint8_t sm_channels = 0;
+   psize = sizeof(sm_channels);
+   if (ecx_SDOread(context, slave, 0x1C00, 0x00, FALSE, &psize, &sm_channels, EC_TIMEOUTSAFE) > 0)
+      printf("    1C00.00h Sync Manager Channels: %d\n", sm_channels);
+
+   /* Read Event Action for Comm Channel Error (2065.21h) - watchdog behavior */
+   uint16_t comm_error_action = 0;
+   psize = sizeof(comm_error_action);
+   if (ecx_SDOread(context, slave, 0x2065, 0x21, FALSE, &psize, &comm_error_action, EC_TIMEOUTSAFE) > 0)
+   {
+      printf("    2065.21h Comm Channel Error Action: 0x%04X", comm_error_action);
+      if (comm_error_action == 0)
+         printf(" [No Action]");
+      else if (comm_error_action == 1)
+         printf(" [Fault]");
+      else if (comm_error_action == 2)
+         printf(" [Shutdown]");
+      printf("\n");
+   }
+
+   /* Verify Interpolation Time Period (60C2.01h) is set correctly */
+   uint8_t interp_mantissa = 0;
+   int8_t interp_exponent = 0;
+   psize = sizeof(interp_mantissa);
+   if (ecx_SDOread(context, slave, 0x60C2, 0x01, FALSE, &psize, &interp_mantissa, EC_TIMEOUTSAFE) > 0)
+   {
+      psize = sizeof(interp_exponent);
+      if (ecx_SDOread(context, slave, 0x60C2, 0x02, FALSE, &psize, &interp_exponent, EC_TIMEOUTSAFE) > 0)
+      {
+         double interp_time_s = interp_mantissa * pow(10.0, interp_exponent);
+         printf("    60C2.01h Interpolation Period: %u × 10^%d = %.3f ms", 
+                interp_mantissa, interp_exponent, interp_time_s * 1000.0);
+         if (fabs(interp_time_s - cycle_s) < 0.0001)
+            printf(" [✓ Matches Cycle Period]");
+         printf("\n");
+      }
+   }
+   printf("\n");
+   /* === END EXPLORATORY READS === */
 
    fieldbus->amc_slave_index = slave;
    return (retval > 0) ? 1 : 0;
@@ -379,6 +461,7 @@ cia402_bring_up(Fieldbus *fieldbus)
       ecx_send_processdata(context);
       wkc = ecx_receive_processdata(context, EC_TIMEOUTRET);
       current_state = tx->statusword & STATUS_WORD_MASK;
+      if (cycles % 500 == 0) printf(" [wkc=%d sw=0x%04X]\n", wkc, tx->statusword);
       if (current_state == STATE_READY_TO_SWITCH_ON)
       {
          printf(" OK (StatusWord=0x%04X)\n", tx->statusword);
@@ -389,7 +472,7 @@ cia402_bring_up(Fieldbus *fieldbus)
    }
    if (cycles >= timeout_cycles)
    {
-      printf(" TIMEOUT\n");
+      printf(" TIMEOUT [wkc=%d sw=0x%04X] \n", wkc, tx->statusword);
       return FALSE;
    }
 
@@ -476,21 +559,27 @@ add_timespec(struct timespec *ts, int64_t addus)
 }
 
 /** \brief Record one timestamped sample to the in-memory sample buffer
- *  Converts actual current from raw Int16 (DC1 scaling) to physical Amps using KP.
+ *  Converts target and actual currents from raw values to physical Amps using KP scaling.
  *  \param fieldbus Fieldbus context (buffer and count updated)
  *  \param timestamp_s Absolute time in seconds
+ *  \param target_current_A_sent Target current computed by master (before PDO encoding)
+ *  \param target_current_A_received Target current read from 2010.01h via SDO (or 0.0 if not yet read)
  *  \param tx Pointer to received TxPDO data
  */
 static void
-log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx)
+log_sample(Fieldbus *fieldbus, double timestamp_s, double target_current_A_sent, double target_current_A_received, const tx_pdo_t *tx)
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
-      double actual_current_A = (tx->actual_current * fieldbus->kp_amps) / 8192.0;
+      double actual_current_A = (tx->actual_current * fieldbus->kp_amps) / 32768.0;
+      double current_demand_A = (tx->current_demand * fieldbus->kp_amps) / 32768.0;
       fieldbus->samples[fieldbus->sample_count].timestamp_s = timestamp_s;
       fieldbus->samples[fieldbus->sample_count].ai1_raw = tx->ai1_raw;
       fieldbus->samples[fieldbus->sample_count].ai2_raw = tx->ai2_raw;
+      fieldbus->samples[fieldbus->sample_count].target_current_A_sent = target_current_A_sent;
+      fieldbus->samples[fieldbus->sample_count].target_current_A_received = target_current_A_received;
       fieldbus->samples[fieldbus->sample_count].actual_current_A = actual_current_A;
+      fieldbus->samples[fieldbus->sample_count].current_demand_A = current_demand_A;
       fieldbus->sample_count++;
    }
 }
@@ -521,6 +610,84 @@ log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
    }
 }
 
+/** \brief Read diagnostic objects (2002h, 2003h, 200Fh, 2021h) via SDO after cyclic loop exits
+ *  Called only when fault_detected is true, after PDO exchange has stopped.
+ *  Logs each non-zero diagnostic value as FAULT_DRIVE_STATUS_FLAG with encoded detail.
+ *  \param fieldbus Fieldbus context
+ *  \param timestamp_s Elapsed time when fault was detected
+ */
+static void
+read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s)
+{
+   ecx_contextt *context = &fieldbus->context;
+   int psize;
+   uint16_t value16;
+   int16_t value_signed16;
+   int32_t value32;
+   uint8_t sub;
+   int32_t temp_raw;
+   double temp_c;
+
+   printf("Reading drive diagnostic objects via SDO...\n");
+
+   /* Read 2002h.01h–.07h (Drive Status: current active fault flags) */
+   printf("  2002h (Drive Status):\n");
+   for (sub = 0x01; sub <= 0x07; sub++)
+   {
+      psize = sizeof(value16);
+      if (ecx_SDOread(context, fieldbus->amc_slave_index, 0x2002, sub, FALSE, 
+                      &psize, &value16, EC_TIMEOUTSAFE) > 0 && value16 != 0)
+      {
+         printf("    .%02Xh = 0x%04X\n", sub, value16);
+         log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
+                   (0x2000 | (sub << 8) | value16), RECOVERY_NONE);
+      }
+   }
+
+   /* Read 2003h.01h–.07h (Drive Status History: events that ever occurred) */
+   printf("  2003h (Status History):\n");
+   for (sub = 0x01; sub <= 0x07; sub++)
+   {
+      psize = sizeof(value16);
+      if (ecx_SDOread(context, fieldbus->amc_slave_index, 0x2003, sub, FALSE, 
+                      &psize, &value16, EC_TIMEOUTSAFE) > 0 && value16 != 0)
+      {
+         printf("    .%02Xh = 0x%04X (history)\n", sub, value16);
+         log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
+                   (0x3000 | (sub << 8) | value16), RECOVERY_NONE);
+      }
+   }
+
+   /* Read 200Fh.01h (DC Bus Voltage, Integer16, DV1 units) */
+   printf("  200Fh (DC Bus Voltage):\n");
+   psize = sizeof(value_signed16);
+   if (ecx_SDOread(context, fieldbus->amc_slave_index, 0x200F, 0x01, FALSE, 
+                   &psize, &value_signed16, EC_TIMEOUTSAFE) > 0)
+   {
+      printf("    .01h = %d (DV1 units)\n", value_signed16);
+      if (value_signed16 < 200)  /* Abnormally low voltage indicator */
+      {
+         log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
+                   (0xF001 | (value_signed16 & 0xFF)), RECOVERY_NONE);
+      }
+   }
+
+   /* Read 2021h.01h (Motor Temperature, Integer32, formula: value/65536 = °C) */
+   printf("  2021h (Motor Temperature):\n");
+   psize = sizeof(value32);
+   if (ecx_SDOread(context, fieldbus->amc_slave_index, 0x2021, 0x01, FALSE, 
+                   &psize, &value32, EC_TIMEOUTSAFE) > 0)
+   {
+      temp_c = value32 / 65536.0;
+      printf("    .01h = %d raw → %.2f °C\n", value32, temp_c);
+      if (temp_c > 80.0)  /* Abnormally high temperature indicator */
+      {
+         log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
+                   (0x2100 | ((int)(temp_c) & 0xFF)), RECOVERY_NONE);
+      }
+   }
+}
+
 /** \brief Run the real-time control loop: generate sine-wave commands, exchange PDO, monitor faults
  *  Operates for RUN_DURATION_S seconds at CYCLE_TIME_MS intervals, synchronized via DC SYNC0.
  *  Detects WKC errors and CiA402 state drift; logs samples and faults to in-memory buffers.
@@ -547,9 +714,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    int cycle_count = 0;
    uint16_t last_statusword = 0;
    uint16_t current_state;
-   int fault_check_counter = 0;
+   boolean fault_detected = FALSE;
 
-   printf("\nStarting 30-second cyclic loop...\n");
+   printf("\nStarting %.0f-second cyclic loop...\n", RUN_DURATION_S);
    
    /* Configure DC SYNC0 */
    ecx_dcsync0(context, fieldbus->amc_slave_index, TRUE, (uint32_t)cycle_ns, 0);
@@ -582,6 +749,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          {
             printf("ERROR: WKC errors exceeded threshold, initiating shutdown\n");
             log_fault(fieldbus, elapsed_s, FAULT_WKC_ERROR, wkc, RECOVERY_SHUTDOWN_INITIATED);
+            fault_detected = TRUE;
             break;
          }
       }
@@ -598,19 +766,12 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          printf("ERROR: Drive dropped out of OPERATION_ENABLED state (0x%04X), initiating shutdown\n", 
                 tx->statusword);
          rx->controlword = CTRL_DISABLE_VOLT;
+         fault_detected = TRUE;
          break;
       }
 
-      /* Periodic drive status polling (placeholder for future SDO-based health checks) */
-      fault_check_counter++;
-      if (fault_check_counter >= 100)
-      {
-         fault_check_counter = 0;
-         /* TODO: SDO-read 2002h (Drive Status: Bridge/Protection/System flags) for comprehensive diagnostics */
-      }
-
-      /* Log sample */
-      log_sample(fieldbus, elapsed_s, tx);
+      /* Log sample with target_current_A_received=0.0 (will be updated via SDO reads post-fault) */
+      log_sample(fieldbus, elapsed_s, target_current_A, 0.0, tx);
 
       /* Wait for next cycle using absolute-time sleep */
       clock_gettime(CLOCK_MONOTONIC, &now);
@@ -630,6 +791,13 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    }
 
    printf("Cyclic loop finished. Samples: %d, Faults: %d\n", fieldbus->sample_count, fieldbus->fault_count);
+
+   /* Read drive diagnostic objects via SDO after cyclic loop exits (PDO idle) */
+   if (fault_detected)
+   {
+      read_drive_status_sdo(fieldbus, elapsed_s);
+   }
+
    return TRUE;
 }
 
@@ -660,14 +828,17 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,ai1_raw,ai2_raw,actual_current_A\n");
+      fprintf(fp, "time_s,target_A_sent,target_A_received,actual_current_A,current_demand_A,ai1_raw,ai2_raw\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%u,%u,%.6f\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u\n",
                  fieldbus->samples[i].timestamp_s,
+                 fieldbus->samples[i].target_current_A_sent,
+                 fieldbus->samples[i].target_current_A_received,
+                 fieldbus->samples[i].actual_current_A,
+                 fieldbus->samples[i].current_demand_A,
                  fieldbus->samples[i].ai1_raw,
-                 fieldbus->samples[i].ai2_raw,
-                 fieldbus->samples[i].actual_current_A);
+                 fieldbus->samples[i].ai2_raw);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);
@@ -712,6 +883,7 @@ int main(int argc, char *argv[])
 {
    Fieldbus fieldbus;
    ec_adaptert *adapter;
+   struct sched_param param;
 
    if (argc != 2)
    {
@@ -725,6 +897,19 @@ int main(int argc, char *argv[])
          adapter = adapter->next;
       }
       return 1;
+   }
+
+   /* Lock memory to prevent page-fault latency */
+   if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+   {
+      printf("WARNING: mlockall() failed (requires CAP_IPC_LOCK or root): %s\n", strerror(errno));
+   }
+
+   /* Enable SCHED_FIFO real-time scheduling at maximum priority */
+   param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+   if (sched_setscheduler(0, SCHED_FIFO, &param) != 0)
+   {
+      printf("WARNING: sched_setscheduler(SCHED_FIFO) failed (requires root): %s\n", strerror(errno));
    }
 
    fieldbus_initialize(&fieldbus, argv[1]);
