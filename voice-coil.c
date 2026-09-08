@@ -172,15 +172,14 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    double cycle_s = CYCLE_TIME_MS / 1000.0;
    uint8 mantissa;
    int8 exponent;
-   uint32 map_1600[3];
+   uint32 map_1600[2];
    uint32 map_1a00[5];
    int i;
 
    printf("Configuring AMC slave %d via SDO...\n", slave);
 
    /* Set mode to CST (0x0A) */
-   psize = sizeof(mode);
-   retval += ecx_SDOwrite(context, slave, 0x6060, 0x00, FALSE, psize, &mode, EC_TIMEOUTSAFE);
+   retval += ecx_SDOwrite(context, slave, 0x6060, 0x00, FALSE, (int)sizeof(mode), &mode, EC_TIMEOUTSAFE);
    printf("  Set mode 6060h = 0x%02X: %s\n", mode, retval > 0 ? "OK" : "FAILED");
 
    /* Compute and write interpolation time period (60C2h) */
@@ -200,69 +199,77 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
       exponent = -3;
    }
    // Write mantissa and exponent to 60C2.01h and 60C2.02h
-   psize = sizeof(mantissa);
-   retval += ecx_SDOwrite(context, slave, 0x60C2, 0x01, FALSE, psize, &mantissa, EC_TIMEOUTSAFE);
-   psize = sizeof(exponent);
-   retval += ecx_SDOwrite(context, slave, 0x60C2, 0x02, FALSE, psize, &exponent, EC_TIMEOUTSAFE);
+   retval += ecx_SDOwrite(context, slave, 0x60C2, 0x01, FALSE, sizeof(mantissa), &mantissa, EC_TIMEOUTSAFE);
+   retval += ecx_SDOwrite(context, slave, 0x60C2, 0x02, FALSE, sizeof(exponent), &exponent, EC_TIMEOUTSAFE);
    printf("  Set interpolation period 60C2h: mantissa=0x%02X, exponent=%d: %s\n", 
           mantissa, exponent, retval > 0 ? "OK" : "FAILED");
 
    /* Configure RxPDO mapping (1600h): ControlWord + Target Current */
    // Clear existing mapping by writing 0 to 1600.00h
-   psize = 1;
-   uint8 zero = 0;
-   retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, psize, &zero, EC_TIMEOUTSAFE);
+   retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
    
    // Define new mapping entries for 1600h: ControlWord (6040.00h) and Target Current (6071.00h)
-   map_1600[0] = 3;
-   map_1600[1] = (0x6040 << 16) | (0x00 << 8) | 0x10;
-   map_1600[2] = (0x6071 << 16) | (0x00 << 8) | 0x10;
+   map_1600[0] = (0x6040 << 16) | (0x00 << 8) | 0x10;
+   map_1600[1] = (0x6071 << 16) | (0x00 << 8) | 0x10;
    
    // Write mapping entries to 1600.01h (1st application object) and 1600.02h (2nd application object)
    for (i = 0; i < 2; i++)
-   {
-      psize = sizeof(uint32);
-      retval += ecx_SDOwrite(context, slave, 0x1600, 0x01 + i, FALSE, psize, 
-                             &map_1600[i + 1], EC_TIMEOUTSAFE);
-   }
+      retval += ecx_SDOwrite(context, slave, 0x1600, 0x01 + i, FALSE, sizeof(map_1600[0]), map_1600 + i, EC_TIMEOUTSAFE);
 
    // Set number of mapped objects to 2 by writing 2 to 1600.00h
-   psize = 1;
-   uint8 two = 2;
-   retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, psize, &two, EC_TIMEOUTSAFE);
+   retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, sizeof(uint8), &(uint8){2}, EC_TIMEOUTSAFE);
    printf("  Configured RxPDO 1600h: ControlWord + Target Current: %s\n", retval > 0 ? "OK" : "FAILED");
 
+   // Read back 1600.00h to verify number of mapped objects
+   uint8 count = 0;
+   psize = sizeof(count);
+   ecx_SDOread(context, slave, 0x1600, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
+   printf("1600.00h count = %d (expect 2)\n", count);
+
+   for (int i = 0; i < count; i++) {
+      uint32 entry = 0;
+      psize = sizeof(entry);
+      ecx_SDOread(context, slave, 0x1600, 0x01 + i, FALSE, &psize, &entry, EC_TIMEOUTSAFE);
+      printf("1600.%02Xh = %08Xh  -> index=%04Xh sub=%02Xh len=%u bits\n",
+            0x01 + i, entry, entry >> 16, (entry >> 8) & 0xFF, entry & 0xFF);
+   }
+
    /* Configure TxPDO mapping (1A00h): StatusWord + Actual Current + Target Current + AI1 raw + AI2 raw */
-   psize = 1;
-   uint8 zero = 0;
    // Clear existing mapping by writing 0 to 1A00.00h
-   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, psize, &zero, EC_TIMEOUTSAFE);
+   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
    
    // Define new mapping entries for 1A00h (TxPDO): StatusWord (6041.00h), Actual Current (6077.00h), Target Current (6071.00h), AI1 raw (2022.01h), AI2 raw (2022.02h)
-   uint32 map_1a00_ext[6];
-   map_1a00_ext[0] = 5;
-   map_1a00_ext[1] = (0x6041 << 16) | (0x00 << 8) | 0x10;
-   map_1a00_ext[2] = (0x6077 << 16) | (0x00 << 8) | 0x10;
-   map_1a00_ext[3] = (0x6071 << 16) | (0x00 << 8) | 0x10;
-   map_1a00_ext[4] = (0x2022 << 16) | (0x01 << 8) | 0x10;
-   map_1a00_ext[5] = (0x2022 << 16) | (0x02 << 8) | 0x10;
+   // uint32 map_1a00_ext[5];
+   map_1a00[0] = (0x6041 << 16) | (0x00 << 8) | 0x10;
+   map_1a00[1] = (0x6077 << 16) | (0x00 << 8) | 0x10;
+   map_1a00[2] = (0x6071 << 16) | (0x00 << 8) | 0x10;
+   map_1a00[3] = (0x2022 << 16) | (0x01 << 8) | 0x10;
+   map_1a00[4] = (0x2022 << 16) | (0x02 << 8) | 0x10;
    
    // Write mapping entries to 1A00.01h (1st application object) through 1A00.05h (5th application object)
    for (i = 0; i < 5; i++)
-   {
-      psize = sizeof(uint32);
-      retval += ecx_SDOwrite(context, slave, 0x1A00, 0x01 + i, FALSE, psize, 
-                             &map_1a00_ext[i + 1], EC_TIMEOUTSAFE);
-   }
+      retval += ecx_SDOwrite(context, slave, 0x1A00, 0x01 + i, FALSE, (int)sizeof(uint32), map_1a00 + i, EC_TIMEOUTSAFE);
 
    // Set number of mapped objects to 5 by writing 5 to 1A00.00h (number of mapped objects)
-   psize = 1;
-   uint8 five = 5;
-   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, psize, &five, EC_TIMEOUTSAFE);
+   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, 1, &(uint8){5}, EC_TIMEOUTSAFE);
    printf("  Configured TxPDO 1A00h: StatusWord + Actual Current + Target Current + AI1/AI2 raw: %s\n", retval > 0 ? "OK" : "FAILED");
 
+   // Read back 1A00.00h to verify number of mapped objects
+   count = 0;
+   psize = sizeof(count);
+   ecx_SDOread(context, slave, 0x1A00, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
+   printf("1A00.00h count = %d (expect 5)\n", count);
+
+   for (int i = 0; i < count; i++) {
+      uint32 entry = 0;
+      psize = sizeof(entry);
+      ecx_SDOread(context, slave, 0x1A00, 0x01 + i, FALSE, &psize, &entry, EC_TIMEOUTSAFE);
+      printf("1A00.%02Xh = %08Xh  -> index=%04Xh sub=%02Xh len=%u bits\n",
+            0x01 + i, entry, entry >> 16, (entry >> 8) & 0xFF, entry & 0xFF);
+   }
+
    /* Read Maximum Peak Current (20D8.0Ch) for current scaling */
-   psize = sizeof(uint32);
+   // psize = sizeof(uint32);
    retval += ecx_SDOread(context, slave, 0x20D8, 0x0C, FALSE, &psize, &kp_raw, EC_TIMEOUTSAFE);
    fieldbus->kp_amps = kp_raw / 10.0;
    printf("  Read Maximum Peak Current (KP): raw=0x%08X -> %.1f A\n", kp_raw, fieldbus->kp_amps);
