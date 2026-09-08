@@ -43,19 +43,61 @@
 #define CTRL_ENABLE_OP      0x000F
 #define CTRL_DISABLE_VOLT   0x0000
 
+#define SERVO_DRIVE_TYPE    0x0192
+
+#define IO_MAP_SIZE        4096
+
+#define DC1_SCALE          8192.0  // Scaling factor 2^13 for CiA402 DC1 current units (16-bit signed)
+
+// PDO object indices for CiA402 current control
+#define ACTUAL_CURRENT_INDEX           0x6077    // Actual current (DC1) in 16-bit signed integer format
+#define TARGET_CURRENT_INDEX           0x6071    // Target current (DC1) in 16-bit signed integer format
+#define CONTROL_WORD_INDEX             0x6040    // ControlWord (16-bit) for CiA402 state machine
+#define STATUS_WORD_INDEX              0x6041    // StatusWord (16-bit) for CiA402 state machine
+#define MODE_OF_OPERATION_INDEX        0x6060    // Mode (16-bit) for CiA402 mode of operation
+#define INTERPOLATION_TIME_INDEX       0x60C2    // Interpolation Time Period (32-bit) for CST mode
+#define AI_RAW_INDEX                   0x2022    // Analog Input raw ADC value (16-bit unsigned)
+#define POWER_BOARD_INFORMATION_INDEX  0x20D8 // Power Board Information (32-bit unsigned) for reading KP
+#define COMM_CHANNEL_ERROR_ACTION_INDEX 0x2065 // Event Action for Comm Channel Error (16-bit unsigned)
+#define SYNC_MANAGER_COMM_TYPE_INDEX   0x1C00 // Sync Manager Communication Type (8-bit unsigned)
+#define DEVICE_TYPE_INDEX              0x1000 // Device Type (32-bit unsigned) for identifying CiA402 drive
+#define IDENTITY_OBJECT_INDEX          0x1018 // Identity Object (32-bit unsigned) for vendor/product info
+#define WATCHDOG_TIMEOUT_INDEX         0x2065 // Watchdog Timeout (16-bit unsigned) for drive watchdog configuration
+#define WATCHDOG_ACTION_INDEX          0x2065 // Watchdog Action (16-bit unsigned) for drive watchdog configuration
+#define SYNC_MANAGER_CHANNELS_INDEX    0x1C00 // Sync Manager Channels (8-bit unsigned) for drive synchronization
+#define TxPDO_INDEX                    0x1A00 // Transmit PDO mapping index for CiA402 drive
+#define RxPDO_INDEX                    0x1600 // Receive PDO mapping index for CiA402 drive
+
+#define MANTISSA_SUBINDEX                    0x01 // Sub-index for mantissa in interpolation time period object
+#define EXPONENT_SUBINDEX                    0x02 // Sub-index for exponent in interpolation time period object
+#define COMM_CHANNEL_ERROR_ACTION_SUBINDEX   0x21 // Sub-index for comm channel error action object
+#define MAX_PEAK_CURRENT_SUBINDEX            0x0C // Sub-index for maximum peak current in power board information object
+#define VENDOR_ID_SUBINDEX                   0x01 // Sub-index for vendor ID in identity object
+#define PRODUCT_CODE_SUBINDEX                0x02 // Sub-index for product code in identity object
+#define REVISION_NUMBER_SUBINDEX             0x03 // Sub-index for revision number in identity object
+#define SERIAL_NUMBER_SUBINDEX               0x04 // Sub-index for serial number in identity object
+#define AI1_RAW_SUBINDEX                     0x01 // Sub-index for Analog Input 1 raw value
+#define AI2_RAW_SUBINDEX                     0x02 // Sub-index for Analog Input 2 raw value
+
+static const uint16_t TxPDOcontents[] = {STATUS_WORD_INDEX, ACTUAL_CURRENT_INDEX, TARGET_CURRENT_INDEX, AI_RAW_INDEX, AI_RAW_INDEX};
+static const uint16_t RxPDOcontents[] = {CONTROL_WORD_INDEX, TARGET_CURRENT_INDEX};
+
+#define TxPDO_CONTENTS_SIZE (sizeof(TxPDOcontents) / sizeof(TxPDOcontents[0]))
+#define RxPDO_CONTENTS_SIZE (sizeof(RxPDOcontents) / sizeof(RxPDOcontents[0]))
+
 /** \brief Master-to-slave process data: CiA402 ControlWord and CST target current command */
 typedef struct OSAL_PACKED
 {
    uint16_t controlword;     /**< CiA402 control bits (Shutdown/Switch On/Enable Operation) */
-   int16_t target_current;   /**< Desired motor current, scaled by KP (DC2 units) */
+   int16_t target_current;   /**< Desired motor current, scaled by KP (DC1 units) */
 } rx_pdo_t;
 
-/** \brief Slave-to-master process data: CiA402 StatusWord, actual current, current demand feedback, and analog sensor inputs */
+/** \brief Slave-to-master process data: CiA402 StatusWord, actual current, target current, and analog sensor inputs */
 typedef struct OSAL_PACKED
 {
    uint16_t statusword;      /**< CiA402 status bits (state machine state + fault bits) */
    int16_t actual_current;   /**< Measured motor current from drive, scaled by KP (DC1 units) */
-   int16_t current_demand;   /**< Drive's internal current demand feedback (2010.02h), DC2 units */
+   int16_t target_current;   /**< Desired motor current, scaled by KP (DC1 units) */
    uint16_t ai1_raw;         /**< Analog Input 1 raw ADC value (0-65535) */
    uint16_t ai2_raw;         /**< Analog Input 2 raw ADC value (0-65535) */
 } tx_pdo_t;
@@ -92,10 +134,10 @@ typedef struct
    double timestamp_s;       /**< Absolute time when sample was acquired */
    uint16_t ai1_raw;         /**< Analog input 1 raw value at this timestamp */
    uint16_t ai2_raw;         /**< Analog input 2 raw value at this timestamp */
-   double target_current_A_sent;     /**< Target current sent by master (before PDO encoding) */
-   double target_current_A_received; /**< Target current as received by slave from 2010.01h (DC2) */
+   // double target_current_A_sent;     /**< Target current sent by master (before PDO encoding) */
+   // double target_current_A_received; /**< Target current as received by slave from 2010.01h (DC2) */
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
-   double current_demand_A;  /**< Drive's reported current demand in Amps at this timestamp (2010.02h decoded) */
+   double target_current_A;  /**< Drive's reported target current in Amps at this timestamp (6071h, DC1) */
 } sample_log_entry_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
@@ -105,7 +147,7 @@ typedef struct
    char *iface;                    /**< Network interface name (e.g., "eth0") */
    uint8 group;                    /**< I/O group index (0 for single-group setup) */
    int roundtrip_time;             /**< Last measured PDO roundtrip time in microseconds */
-   uint8 map[4096];                /**< I/O mapping buffer for ecx_config_map_group() */
+   uint8 map[IO_MAP_SIZE];                /**< I/O mapping buffer for ecx_config_map_group() */
    double kp_amps;                 /**< Drive peak current rating (read from object 20D8.0Ch); used for current scaling */
    uint16_t amc_slave_index;       /**< Slave index of detected AMC drive (1-based) */
    sample_log_entry_t *samples;    /**< Preallocated buffer for cyclic samples */
@@ -158,31 +200,31 @@ fieldbus_roundtrip(Fieldbus *fieldbus)
  *  Called automatically by ecx_config_map_group() for any slave with PO2SOconfig assigned.
  *  \param context SOEM EtherCAT context
  *  \param slave Slave index (1-based)
- *  \return 1 on success, 0 on failure
+ *  \return 1 on success, 0 on failure (not used in this implementation)
  */
 static int
 amc_slave_config(ecx_contextt *context, uint16 slave)
 {
    Fieldbus *fieldbus = (Fieldbus *)context->userdata;
-   int retval = 0;
+   int wkc_write = 0;
+   int wkc_read = 0;
    int psize;
-   int8 mode = CST_MODE;
-   uint16 ctrl_word = CTRL_SHUTDOWN;
-   uint32 kp_raw;
-   double cycle_s = CYCLE_TIME_MS / 1000.0;
-   uint8 mantissa;
-   int8 exponent;
-   uint32 map_1600[2];
-   uint32 map_1a00[5];
-   int i;
 
    printf("Configuring AMC slave %d via SDO...\n", slave);
 
-   /* Set mode to CST (0x0A) */
-   retval += ecx_SDOwrite(context, slave, 0x6060, 0x00, FALSE, (int)sizeof(mode), &mode, EC_TIMEOUTSAFE);
-   printf("  Set mode 6060h = 0x%02X: %s\n", mode, retval > 0 ? "OK" : "FAILED");
+   /* Set mode of operation (6060h) to CST (0x0A) */
+   uint8 mode = CST_MODE;
+   psize = sizeof(mode);
+   wkc_write = ecx_SDOwrite(context, slave, MODE_OF_OPERATION_INDEX, 0x00, FALSE, psize, &mode, EC_TIMEOUTSAFE);
+   printf("  Wrote mode of operation (6060h) = 0x%02X. psize = %d. wkc_write = %d.\n", mode, psize, wkc_write);
+   mode = 0;
+   wkc_read = ecx_SDOread(context, slave, MODE_OF_OPERATION_INDEX, 0x00, FALSE, &psize, &mode, EC_TIMEOUTSAFE);
+   printf("  Read mode of operation (6060h) = 0x%02X. psize = %d. wkc_read = %d.\n", mode, psize, wkc_read);
 
    /* Compute and write interpolation time period (60C2h) */
+   double cycle_s = CYCLE_TIME_MS / 1000.0;
+   uint8 mantissa;
+   int8 exponent;
    if (cycle_s >= 0.1)
    {
       mantissa = (uint8)(cycle_s / 0.1);
@@ -193,86 +235,104 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
       mantissa = (uint8)(cycle_s / 0.01);
       exponent = -2;
    }
-   else
+   else if (cycle_s >= 0.001)
    {
       mantissa = (uint8)(cycle_s / 0.001);
       exponent = -3;
    }
-   // Write mantissa and exponent to 60C2.01h and 60C2.02h
-   retval += ecx_SDOwrite(context, slave, 0x60C2, 0x01, FALSE, sizeof(mantissa), &mantissa, EC_TIMEOUTSAFE);
-   retval += ecx_SDOwrite(context, slave, 0x60C2, 0x02, FALSE, sizeof(exponent), &exponent, EC_TIMEOUTSAFE);
-   printf("  Set interpolation period 60C2h: mantissa=0x%02X, exponent=%d: %s\n", 
-          mantissa, exponent, retval > 0 ? "OK" : "FAILED");
+   else
+   {
+      mantissa = (uint8)(cycle_s / 0.0001);
+      exponent = -4;
+   }
+
+   // Write mantissa and exponent to 60C2.01h and 60C2.02h, respectively
+   psize = sizeof(mantissa);
+   wkc_write = ecx_SDOwrite(context, slave, INTERPOLATION_TIME_INDEX, MANTISSA_SUBINDEX, FALSE, psize, &mantissa, EC_TIMEOUTSAFE);
+   printf("  Wrote interpolation period mantissa (60C2.01h) = 0x%02X. psize = %d. wkc_write = %d.\n", mantissa, psize, wkc_write);
+   mantissa = 0;
+   wkc_read = ecx_SDOread(context, slave, INTERPOLATION_TIME_INDEX, MANTISSA_SUBINDEX, FALSE, &psize, &mantissa, EC_TIMEOUTSAFE);
+   printf("  Read interpolation period mantissa (60C2.01h) = 0x%02X. psize = %d, wkc_read = %d\n", mantissa, psize, wkc_read);
+   
+   psize = sizeof(exponent);
+   wkc_write = ecx_SDOwrite(context, slave, INTERPOLATION_TIME_INDEX, EXPONENT_SUBINDEX, FALSE, psize, &exponent, EC_TIMEOUTSAFE);
+   printf("  Wrote interpolation period exponent (60C2.02h) = %d. psize = %d. wkc_write = %d.\n", exponent, psize, wkc_write);
+   exponent = 0;
+   wkc_read = ecx_SDOread(context, slave, INTERPOLATION_TIME_INDEX, EXPONENT_SUBINDEX, FALSE, &psize, &exponent, EC_TIMEOUTSAFE);
+   printf("  Read interpolation period exponent (60C2.02h) = %d. psize = %d, wkc_read = %d\n", exponent, psize, wkc_read);
+
 
    /* Configure RxPDO mapping (1600h): ControlWord + Target Current */
    // Clear existing mapping by writing 0 to 1600.00h
-   retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
+   wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
    
-   // Define new mapping entries for 1600h: ControlWord (6040.00h) and Target Current (6071.00h)
-   map_1600[0] = (0x6040 << 16) | (0x00 << 8) | 0x10;
-   map_1600[1] = (0x6071 << 16) | (0x00 << 8) | 0x10;
+   // Define new mapping entries for RxPDO (1600h)
+   printf("  Creating map_RxPDO array with %d elements (expected 2).\n", (int)RxPDO_CONTENTS_SIZE);
+   uint32 map_RxPDO[RxPDO_CONTENTS_SIZE];
+   map_RxPDO[0] = (0x6040 << 16) | (0x00 << 8) | 0x10;
+   map_RxPDO[1] = (0x6071 << 16) | (0x00 << 8) | 0x10;
    
-   // Write mapping entries to 1600.01h (1st application object) and 1600.02h (2nd application object)
-   for (i = 0; i < 2; i++)
-      retval += ecx_SDOwrite(context, slave, 0x1600, 0x01 + i, FALSE, sizeof(map_1600[0]), map_1600 + i, EC_TIMEOUTSAFE);
+   // Write mapping entries objects to 1600.01h through 1600.<RxPDO_CONTENTS_SIZE>h
+   for (int i = 0; i < RxPDO_CONTENTS_SIZE; i++)
+      wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x01 + i, FALSE, sizeof(map_RxPDO[0]), map_RxPDO + i, EC_TIMEOUTSAFE);
 
-   // Set number of mapped objects to 2 by writing 2 to 1600.00h
-   retval += ecx_SDOwrite(context, slave, 0x1600, 0x00, FALSE, sizeof(uint8), &(uint8){2}, EC_TIMEOUTSAFE);
-   printf("  Configured RxPDO 1600h: ControlWord + Target Current: %s\n", retval > 0 ? "OK" : "FAILED");
-
-   // Read back 1600.00h to verify number of mapped objects
+   // Set number of mapped objects to RxPDO_CONTENTS_SIZE by writing to 1600.00h
+   wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x00, FALSE, sizeof(uint8), &(uint8){RxPDO_CONTENTS_SIZE}, EC_TIMEOUTSAFE);
+   
+   // Read back RxPDO mapping (1600.00h) to verify number of mapped objects
    uint8 count = 0;
    psize = sizeof(count);
-   ecx_SDOread(context, slave, 0x1600, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
-   printf("1600.00h count = %d (expect 2)\n", count);
+   wkc_read = ecx_SDOread(context, slave, RxPDO_INDEX, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
+   printf("  Read RxPDO (1600.00h) mapping with %d objects (expected %d). psize = %d, wkc_read = %d\n", count, (int)RxPDO_CONTENTS_SIZE, psize, wkc_read);
 
    for (int i = 0; i < count; i++) {
       uint32 entry = 0;
       psize = sizeof(entry);
-      ecx_SDOread(context, slave, 0x1600, 0x01 + i, FALSE, &psize, &entry, EC_TIMEOUTSAFE);
-      printf("1600.%02Xh = %08Xh  -> index=%04Xh sub=%02Xh len=%u bits\n",
-            0x01 + i, entry, entry >> 16, (entry >> 8) & 0xFF, entry & 0xFF);
+      wkc_read = ecx_SDOread(context, slave, RxPDO_INDEX, 0x01 + i, FALSE, &psize, &entry, EC_TIMEOUTSAFE);
+      printf("  1600.%02Xh = %08Xh  -> index=%04Xh sub=%02Xh len=%u bits. psize = %d, wkc_read = %d\n",
+            0x01 + i, entry, entry >> 16, (entry >> 8) & 0xFF, entry & 0xFF, psize, wkc_read);
    }
 
-   /* Configure TxPDO mapping (1A00h): StatusWord + Actual Current + Target Current + AI1 raw + AI2 raw */
+   /* Configure TxPDO mapping (1A00h) */
    // Clear existing mapping by writing 0 to 1A00.00h
-   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
+   wkc_write = ecx_SDOwrite(context, slave, TxPDO_INDEX, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
    
-   // Define new mapping entries for 1A00h (TxPDO): StatusWord (6041.00h), Actual Current (6077.00h), Target Current (6071.00h), AI1 raw (2022.01h), AI2 raw (2022.02h)
-   // uint32 map_1a00_ext[5];
-   map_1a00[0] = (0x6041 << 16) | (0x00 << 8) | 0x10;
-   map_1a00[1] = (0x6077 << 16) | (0x00 << 8) | 0x10;
-   map_1a00[2] = (0x6071 << 16) | (0x00 << 8) | 0x10;
-   map_1a00[3] = (0x2022 << 16) | (0x01 << 8) | 0x10;
-   map_1a00[4] = (0x2022 << 16) | (0x02 << 8) | 0x10;
+   // Define new mapping entries for TxPDO (1A00h)
+   printf("  Creating map_TxPDO array with %d elements (expected 5).\n", (int)TxPDO_CONTENTS_SIZE);
+   uint32 map_TxPDO[TxPDO_CONTENTS_SIZE];
+   map_TxPDO[0] = (STATUS_WORD_INDEX << 16) | (0x00 << 8) | 0x10;
+   map_TxPDO[1] = (ACTUAL_CURRENT_INDEX << 16) | (0x00 << 8) | 0x10;
+   map_TxPDO[2] = (TARGET_CURRENT_INDEX << 16) | (0x00 << 8) | 0x10;
+   map_TxPDO[3] = (AI_RAW_INDEX << 16) | (AI1_RAW_SUBINDEX << 8) | 0x10;
+   map_TxPDO[4] = (AI_RAW_INDEX << 16) | (AI2_RAW_SUBINDEX << 8) | 0x10;
    
-   // Write mapping entries to 1A00.01h (1st application object) through 1A00.05h (5th application object)
-   for (i = 0; i < 5; i++)
-      retval += ecx_SDOwrite(context, slave, 0x1A00, 0x01 + i, FALSE, (int)sizeof(uint32), map_1a00 + i, EC_TIMEOUTSAFE);
+   // Write mapping entries to 1A00.01h (1st application object) through 1A00.<PDO_CONTENTS_SIZE>h (last application object)
+   for (int i = 0; i < TxPDO_CONTENTS_SIZE; i++)
+      wkc_write = ecx_SDOwrite(context, slave, TxPDO_INDEX, 0x01 + i, FALSE, (int)sizeof(uint32), map_TxPDO + i, EC_TIMEOUTSAFE);
 
-   // Set number of mapped objects to 5 by writing 5 to 1A00.00h (number of mapped objects)
-   retval += ecx_SDOwrite(context, slave, 0x1A00, 0x00, FALSE, 1, &(uint8){5}, EC_TIMEOUTSAFE);
-   printf("  Configured TxPDO 1A00h: StatusWord + Actual Current + Target Current + AI1/AI2 raw: %s\n", retval > 0 ? "OK" : "FAILED");
+   // Set number of mapped objects to TxPDO_CONTENTS_SIZE by writing to 1A00.00h (number of mapped objects)
+   wkc_write = ecx_SDOwrite(context, slave, TxPDO_INDEX, 0x00, FALSE, 1, &(uint8){TxPDO_CONTENTS_SIZE}, EC_TIMEOUTSAFE);
 
-   // Read back 1A00.00h to verify number of mapped objects
+   // Read back TxPDO mapping[0] (1A00.00h) to verify number of mapped objects
    count = 0;
    psize = sizeof(count);
-   ecx_SDOread(context, slave, 0x1A00, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
-   printf("1A00.00h count = %d (expect 5)\n", count);
+   wkc_read = ecx_SDOread(context, slave, TxPDO_INDEX, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
+   printf("  Read TxPDO (1A00.00h) mapping with %d objects (expected %d). psize = %d, wkc_read = %d\n", count, (int)TxPDO_CONTENTS_SIZE, psize, wkc_read);
 
    for (int i = 0; i < count; i++) {
       uint32 entry = 0;
       psize = sizeof(entry);
-      ecx_SDOread(context, slave, 0x1A00, 0x01 + i, FALSE, &psize, &entry, EC_TIMEOUTSAFE);
-      printf("1A00.%02Xh = %08Xh  -> index=%04Xh sub=%02Xh len=%u bits\n",
-            0x01 + i, entry, entry >> 16, (entry >> 8) & 0xFF, entry & 0xFF);
+      wkc_read = ecx_SDOread(context, slave, TxPDO_INDEX, 0x01 + i, FALSE, &psize, &entry, EC_TIMEOUTSAFE);
+      printf("  1A00.%02Xh = %08Xh  -> index=%04Xh sub=%02Xh len=%u bits. psize = %d, wkc_read = %d\n",
+            0x01 + i, entry, entry >> 16, (entry >> 8) & 0xFF, entry & 0xFF, psize, wkc_read);
    }
 
    /* Read Maximum Peak Current (20D8.0Ch) for current scaling */
-   // psize = sizeof(uint32);
-   retval += ecx_SDOread(context, slave, 0x20D8, 0x0C, FALSE, &psize, &kp_raw, EC_TIMEOUTSAFE);
+   uint32 kp_raw = 0;
+   psize = sizeof(kp_raw);
+   wkc_read = ecx_SDOread(context, slave, POWER_BOARD_INFORMATION_INDEX, MAX_PEAK_CURRENT_SUBINDEX, FALSE, &psize, &kp_raw, EC_TIMEOUTSAFE);
    fieldbus->kp_amps = kp_raw / 10.0;
-   printf("  Read Maximum Peak Current (KP): raw=0x%08X -> %.1f A\n", kp_raw, fieldbus->kp_amps);
+   printf("  Read Maximum Peak Current (KP): raw=0x%08X -> %.1f A. psize = %d, wkc_read = %d\n", kp_raw, fieldbus->kp_amps, psize, wkc_read);
 
    /* === EXPLORATORY READS: Watchdog & Synchronization Diagnostics === */
    printf("\n  Diagnostic Reads (Synchronization & Watchdog Configuration):\n");
@@ -280,10 +340,10 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    /* Read Device Type (1000h) */
    uint32_t device_type = 0;
    psize = sizeof(device_type);
-   if (ecx_SDOread(context, slave, 0x1000, 0x00, FALSE, &psize, &device_type, EC_TIMEOUTSAFE) > 0)
+   if ((wkc_read = ecx_SDOread(context, slave, DEVICE_TYPE_INDEX, 0x00, FALSE, &psize, &device_type, EC_TIMEOUTSAFE)) > 0)
    {
-      printf("    1000h Device Type: 0x%08X", device_type);
-      if ((device_type & 0xFFFF) == 0x0192)
+      printf("    Read Device Type (1000h): 0x%08X. psize = %d, wkc_read = %d", device_type, psize, wkc_read);
+      if ((device_type & 0xFFFF) == SERVO_DRIVE_TYPE)
          printf(" [CiA402 Servo Drive]");
       printf("\n");
    }
@@ -291,64 +351,64 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    /* Read Identity Object (1018h sub-indices) */
    uint32_t vendor_id = 0, product_code = 0, revision = 0, serial = 0;
    psize = sizeof(vendor_id);
-   if (ecx_SDOread(context, slave, 0x1018, 0x01, FALSE, &psize, &vendor_id, EC_TIMEOUTSAFE) > 0)
-      printf("    1018.01h Vendor ID: 0x%02X\n", vendor_id);
+   if ((wkc_read = ecx_SDOread(context, slave, IDENTITY_OBJECT_INDEX, VENDOR_ID_SUBINDEX, FALSE, &psize, &vendor_id, EC_TIMEOUTSAFE)) > 0)
+      printf("    Read Vendor ID (1018.01h): 0x%02X. psize = %d, wkc_read = %d\n", vendor_id, psize, wkc_read);
    
    psize = sizeof(product_code);
-   if (ecx_SDOread(context, slave, 0x1018, 0x02, FALSE, &psize, &product_code, EC_TIMEOUTSAFE) > 0)
-      printf("    1018.02h Product Code: 0x%08X\n", product_code);
+   if ((wkc_read = ecx_SDOread(context, slave, IDENTITY_OBJECT_INDEX, PRODUCT_CODE_SUBINDEX, FALSE, &psize, &product_code, EC_TIMEOUTSAFE)) > 0)
+      printf("    Read Product Code (1018.02h): 0x%08X. psize = %d, wkc_read = %d\n", product_code, psize, wkc_read);
    
    psize = sizeof(revision);
-   if (ecx_SDOread(context, slave, 0x1018, 0x03, FALSE, &psize, &revision, EC_TIMEOUTSAFE) > 0)
-      printf("    1018.03h Revision: 0x%08X\n", revision);
+   if ((wkc_read = ecx_SDOread(context, slave, IDENTITY_OBJECT_INDEX, REVISION_NUMBER_SUBINDEX, FALSE, &psize, &revision, EC_TIMEOUTSAFE)) > 0)
+      printf("    Read Revision (1018.03h): 0x%08X. psize = %d, wkc_read = %d\n", revision, psize, wkc_read);
    
    psize = sizeof(serial);
-   if (ecx_SDOread(context, slave, 0x1018, 0x04, FALSE, &psize, &serial, EC_TIMEOUTSAFE) > 0)
-      printf("    1018.04h Serial Number: 0x%08X\n", serial);
+   if ((wkc_read = ecx_SDOread(context, slave, IDENTITY_OBJECT_INDEX, SERIAL_NUMBER_SUBINDEX, FALSE, &psize, &serial, EC_TIMEOUTSAFE)) > 0)
+      printf("    Read Serial Number (1018.04h): 0x%08X. psize = %d, wkc_read = %d\n", serial, psize, wkc_read);
 
    /* Read Sync Manager Communication Type (1C00h) */
    uint8_t sm_channels = 0;
    psize = sizeof(sm_channels);
-   if (ecx_SDOread(context, slave, 0x1C00, 0x00, FALSE, &psize, &sm_channels, EC_TIMEOUTSAFE) > 0)
-      printf("    1C00.00h Sync Manager Channels: %d\n", sm_channels);
+   if ((wkc_read = ecx_SDOread(context, slave, SYNC_MANAGER_COMM_TYPE_INDEX, 0x00, FALSE, &psize, &sm_channels, EC_TIMEOUTSAFE)) > 0)
+      printf("    Read Sync Manager Channels (1C00.00h): %d. psize = %d, wkc_read = %d\n", sm_channels, psize, wkc_read);
 
    /* Read Event Action for Comm Channel Error (2065.21h) - watchdog behavior */
    uint16_t comm_error_action = 0;
    psize = sizeof(comm_error_action);
-   if (ecx_SDOread(context, slave, 0x2065, 0x21, FALSE, &psize, &comm_error_action, EC_TIMEOUTSAFE) > 0)
+   if ((wkc_read = ecx_SDOread(context, slave, COMM_CHANNEL_ERROR_ACTION_INDEX, COMM_CHANNEL_ERROR_ACTION_SUBINDEX, FALSE, &psize, &comm_error_action, EC_TIMEOUTSAFE)) > 0)
    {
-      printf("    2065.21h Comm Channel Error Action: 0x%04X", comm_error_action);
+      printf("    Read Comm Channel Error Action (2065.21h): 0x%04X. ", comm_error_action);
       if (comm_error_action == 0)
          printf(" [No Action]");
       else if (comm_error_action == 1)
          printf(" [Fault]");
       else if (comm_error_action == 2)
          printf(" [Shutdown]");
-      printf("\n");
+      printf(" psize = %d, wkc_read = %d\n", psize, wkc_read);
    }
 
-   /* Verify Interpolation Time Period (60C2.01h) is set correctly */
+   /* Verify Interpolation Time Period (60C2h) is set correctly */
    uint8_t interp_mantissa = 0;
    int8_t interp_exponent = 0;
-   psize = sizeof(interp_mantissa);
-   if (ecx_SDOread(context, slave, 0x60C2, 0x01, FALSE, &psize, &interp_mantissa, EC_TIMEOUTSAFE) > 0)
+   int psize_mantissa = sizeof(interp_mantissa);
+   if ((wkc_read = ecx_SDOread(context, slave, INTERPOLATION_TIME_INDEX, MANTISSA_SUBINDEX, FALSE, &psize_mantissa, &interp_mantissa, EC_TIMEOUTSAFE)) > 0)
    {
-      psize = sizeof(interp_exponent);
-      if (ecx_SDOread(context, slave, 0x60C2, 0x02, FALSE, &psize, &interp_exponent, EC_TIMEOUTSAFE) > 0)
+      int psize_exponent = sizeof(interp_exponent);
+      if ((wkc_read = ecx_SDOread(context, slave, INTERPOLATION_TIME_INDEX, EXPONENT_SUBINDEX, FALSE, &psize_exponent, &interp_exponent, EC_TIMEOUTSAFE)) > 0)
       {
          double interp_time_s = interp_mantissa * pow(10.0, interp_exponent);
-         printf("    60C2.01h Interpolation Period: %u × 10^%d = %.3f ms", 
+         printf("    Read Interpolation Period (60C2.01h): %u × 10^%d = %.3f ms", 
                 interp_mantissa, interp_exponent, interp_time_s * 1000.0);
          if (fabs(interp_time_s - cycle_s) < 0.0001)
             printf(" [✓ Matches Cycle Period]");
-         printf("\n");
+         printf(" psize_mantissa = %d, psize_exponent = %d, wkc_read = %d\n", psize_mantissa, psize_exponent, wkc_read);
       }
    }
    printf("\n");
    /* === END EXPLORATORY READS === */
 
    fieldbus->amc_slave_index = slave;
-   return (retval > 0) ? 1 : 0;
+   return 1;
 }
 
 /** \brief Initialize EtherCAT network: detect slaves, assign config hook, map I/O, configure DC, reach Operational
@@ -397,7 +457,7 @@ fieldbus_start(Fieldbus *fieldbus)
    printf("Sequential mapping of I/O... ");
    ecx_config_map_group(context, fieldbus->map, fieldbus->group);
    grp = context->grouplist + fieldbus->group;
-   printf("mapped %dO+%dI bytes\n", grp->Obytes, grp->Ibytes);
+   printf("mapped %dO+%dI bytes (expected 4 Obytes and 10 Ibytes).\n", grp->Obytes, grp->Ibytes);
 
    printf("Configuring distributed clock... ");
    ecx_configdc(context);
@@ -590,15 +650,15 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, double target_current_A_sent,
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
-      double actual_current_A = (tx->actual_current * fieldbus->kp_amps) / 32768.0;
-      double current_demand_A = (tx->current_demand * fieldbus->kp_amps) / 32768.0;
+      double actual_current_A = (tx->actual_current * fieldbus->kp_amps) / DC1_SCALE;
+      double target_current_A = (tx->target_current * fieldbus->kp_amps) / DC1_SCALE;
       fieldbus->samples[fieldbus->sample_count].timestamp_s = timestamp_s;
       fieldbus->samples[fieldbus->sample_count].ai1_raw = tx->ai1_raw;
       fieldbus->samples[fieldbus->sample_count].ai2_raw = tx->ai2_raw;
-      fieldbus->samples[fieldbus->sample_count].target_current_A_sent = target_current_A_sent;
-      fieldbus->samples[fieldbus->sample_count].target_current_A_received = target_current_A_received;
+      // fieldbus->samples[fieldbus->sample_count].target_current_A_sent = target_current_A_sent;
+      // fieldbus->samples[fieldbus->sample_count].target_current_A_received = target_current_A_received;
       fieldbus->samples[fieldbus->sample_count].actual_current_A = actual_current_A;
-      fieldbus->samples[fieldbus->sample_count].current_demand_A = current_demand_A;
+      fieldbus->samples[fieldbus->sample_count].target_current_A = target_current_A;
       fieldbus->sample_count++;
    }
 }
@@ -847,15 +907,16 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,target_A_sent,target_A_received,actual_current_A,current_demand_A,ai1_raw,ai2_raw\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,ai1_raw,ai2_raw\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u\n",
+         // fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%u,%u\n",
                  fieldbus->samples[i].timestamp_s,
-                 fieldbus->samples[i].target_current_A_sent,
-                 fieldbus->samples[i].target_current_A_received,
+               //   fieldbus->samples[i].target_current_A_sent,
+               //   fieldbus->samples[i].target_current_A_received,
                  fieldbus->samples[i].actual_current_A,
-                 fieldbus->samples[i].current_demand_A,
+                 fieldbus->samples[i].target_current_A,
                  fieldbus->samples[i].ai1_raw,
                  fieldbus->samples[i].ai2_raw);
       }
