@@ -27,7 +27,7 @@
 #define CYCLE_TIME_MS       1.0  /**< EtherCAT cycle period in milliseconds */
 #define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
 #define SINE_AMPLITUDE_A    2.0  /**< Target current waveform amplitude in Amps */
-#define RUN_DURATION_S      5.0 /**< Total runtime in seconds */
+#define RUN_DURATION_S      30.0 /**< Total runtime in seconds */
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 #define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
@@ -48,15 +48,20 @@
 #define IO_MAP_SIZE        4096
 
 #define DC1_SCALE          8192.0  // Scaling factor 2^13 for CiA402 DC1 current units (16-bit signed)
+#define DC2_SCALE          32768.0 // Scaling factor 2^15 for CiA402 DC2 position/velocity units (32-bit signed)
 
 // PDO object indices for CiA402 current control
 #define ACTUAL_CURRENT_INDEX           0x6077    // Actual current (DC1) in 16-bit signed integer format
 #define TARGET_CURRENT_INDEX           0x6071    // Target current (DC1) in 16-bit signed integer format
+#define TARGET_POSITION_INDEX          0x607A    // Target position (DC2) in 32-bit signed integer format
+#define TARGET_VELOCITY_INDEX          0x60FF    // Target velocity (DC2) in 32-bit signed integer format
+#define CURRENT_VALUES_INDEX           0x2010    // Current values (DC1) in 16-bit signed integer format
 #define CONTROL_WORD_INDEX             0x6040    // ControlWord (16-bit) for CiA402 state machine
 #define STATUS_WORD_INDEX              0x6041    // StatusWord (16-bit) for CiA402 state machine
 #define MODE_OF_OPERATION_INDEX        0x6060    // Mode (16-bit) for CiA402 mode of operation
 #define INTERPOLATION_TIME_INDEX       0x60C2    // Interpolation Time Period (32-bit) for CST mode
 #define AI_RAW_INDEX                   0x2022    // Analog Input raw ADC value (16-bit unsigned)
+#define AI_VALUE_INDEX                 0x201A    // Analog Input scaled value (16-bit signed)
 #define POWER_BOARD_INFORMATION_INDEX  0x20D8 // Power Board Information (32-bit unsigned) for reading KP
 #define COMM_CHANNEL_ERROR_ACTION_INDEX 0x2065 // Event Action for Comm Channel Error (16-bit unsigned)
 #define SYNC_MANAGER_COMM_TYPE_INDEX   0x1C00 // Sync Manager Communication Type (8-bit unsigned)
@@ -78,17 +83,23 @@
 #define SERIAL_NUMBER_SUBINDEX               0x04 // Sub-index for serial number in identity object
 #define AI1_RAW_SUBINDEX                     0x01 // Sub-index for Analog Input 1 raw value
 #define AI2_RAW_SUBINDEX                     0x02 // Sub-index for Analog Input 2 raw value
+#define CURRENT_DEMAND_SUBINDEX              0x02 // Sub-index for Current Demand in the current values object
+#define AI1_VALUE_SUBINDEX                   0x01 // Sub-index for Analog Input 1 scaled value
+#define AI2_VALUE_SUBINDEX                   0x02 // Sub-index for Analog Input 2 scaled value
 
-static const uint16_t TxPDOcontents[] = {STATUS_WORD_INDEX, ACTUAL_CURRENT_INDEX, TARGET_CURRENT_INDEX, AI_RAW_INDEX, AI_RAW_INDEX};
-static const uint16_t RxPDOcontents[] = {CONTROL_WORD_INDEX, TARGET_CURRENT_INDEX};
+// static const uint16_t TxPDOcontents[] = {STATUS_WORD_INDEX, ACTUAL_CURRENT_INDEX, TARGET_CURRENT_INDEX, AI_RAW_INDEX, AI_RAW_INDEX, 
+//    CURRENT_DEMAND_INDEX, AI_VALUE_INDEX, AI_VALUE_INDEX};
+//static const uint16_t RxPDOcontents[] = {CONTROL_WORD_INDEX, TARGET_POSITION_INDEX, TARGET_VELOCITY_INDEX, TARGET_CURRENT_INDEX};
 
 #define TxPDO_CONTENTS_SIZE (sizeof(TxPDOcontents) / sizeof(TxPDOcontents[0]))
-#define RxPDO_CONTENTS_SIZE (sizeof(RxPDOcontents) / sizeof(RxPDOcontents[0]))
+//#define RxPDO_CONTENTS_SIZE (sizeof(RxPDOcontents) / sizeof(RxPDOcontents[0]))
 
 /** \brief Master-to-slave process data: CiA402 ControlWord and CST target current command */
 typedef struct OSAL_PACKED
 {
    uint16_t controlword;     /**< CiA402 control bits (Shutdown/Switch On/Enable Operation) */
+   int32_t target_position;  /**< Desired motor position (encoder units) */
+   int32_t target_velocity;  /**< Desired motor velocity (encoder units/s) */
    int16_t target_current;   /**< Desired motor current, scaled by KP (DC1 units) */
 } rx_pdo_t;
 
@@ -100,6 +111,9 @@ typedef struct OSAL_PACKED
    int16_t target_current;   /**< Desired motor current, scaled by KP (DC1 units) */
    uint16_t ai1_raw;         /**< Analog Input 1 raw ADC value (0-65535) */
    uint16_t ai2_raw;         /**< Analog Input 2 raw ADC value (0-65535) */
+   int16_t ai1_value;        /**< Analog Input 1 scaled value */
+   int16_t ai2_value;        /**< Analog Input 2 scaled value */
+   int16_t demand_current;    /**< Current Demand from drive (DC1 units) */
 } tx_pdo_t;
 
 /** \brief Fault categories for diagnostic logging */
@@ -134,10 +148,11 @@ typedef struct
    double timestamp_s;       /**< Absolute time when sample was acquired */
    uint16_t ai1_raw;         /**< Analog input 1 raw value at this timestamp */
    uint16_t ai2_raw;         /**< Analog input 2 raw value at this timestamp */
-   // double target_current_A_sent;     /**< Target current sent by master (before PDO encoding) */
-   // double target_current_A_received; /**< Target current as received by slave from 2010.01h (DC2) */
+   int16_t ai1_value;        /**< Analog input 1 scaled value at this timestamp */
+   int16_t ai2_value;        /**< Analog input 2 scaled value at this timestamp */
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
    double target_current_A;  /**< Drive's reported target current in Amps at this timestamp (6071h, DC1) */
+   double demand_current_A;  /**< Drive's reported current demand in Amps at this timestamp (2010h.02, DC1) */
 } sample_log_entry_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
@@ -220,6 +235,10 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    mode = 0;
    wkc_read = ecx_SDOread(context, slave, MODE_OF_OPERATION_INDEX, 0x00, FALSE, &psize, &mode, EC_TIMEOUTSAFE);
    printf("  Read mode of operation (6060h) = 0x%02X. psize = %d. wkc_read = %d.\n", mode, psize, wkc_read);
+   int8 mode_display = 0;
+   psize = sizeof(mode_display);
+   wkc_read = ecx_SDOread(context, slave, 0x6061, 0x00, FALSE, &psize, &mode_display, EC_TIMEOUTSAFE);
+   printf("  Read mode of operation display (6061h) = 0x%02X. psize = %d. wkc_read = %d.\n", mode_display, psize, wkc_read);
 
    /* Compute and write interpolation time period (60C2h) */
    double cycle_s = CYCLE_TIME_MS / 1000.0;
@@ -261,29 +280,40 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    wkc_read = ecx_SDOread(context, slave, INTERPOLATION_TIME_INDEX, EXPONENT_SUBINDEX, FALSE, &psize, &exponent, EC_TIMEOUTSAFE);
    printf("  Read interpolation period exponent (60C2.02h) = %d. psize = %d, wkc_read = %d\n", exponent, psize, wkc_read);
 
-
    /* Configure RxPDO mapping (1600h): ControlWord + Target Current */
    // Clear existing mapping by writing 0 to 1600.00h
    wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
    
    // Define new mapping entries for RxPDO (1600h)
-   printf("  Creating map_RxPDO array with %d elements (expected 2).\n", (int)RxPDO_CONTENTS_SIZE);
-   uint32 map_RxPDO[RxPDO_CONTENTS_SIZE];
+   printf("  Creating map_RxPDO array.\n");
+   uint32 map_RxPDO[4];
    map_RxPDO[0] = (0x6040 << 16) | (0x00 << 8) | 0x10;
-   map_RxPDO[1] = (0x6071 << 16) | (0x00 << 8) | 0x10;
+   map_RxPDO[1] = (0x607A << 16) | (0x00 << 8) | 0x20;
+   map_RxPDO[2] = (0x60FF << 16) | (0x00 << 8) | 0x20;
+   map_RxPDO[3] = (0x6071 << 16) | (0x00 << 8) | 0x10;
    
+   int8 number_of_mapped_Rx_objects = sizeof(map_RxPDO) / sizeof(map_RxPDO[0]);
    // Write mapping entries objects to 1600.01h through 1600.<RxPDO_CONTENTS_SIZE>h
-   for (int i = 0; i < RxPDO_CONTENTS_SIZE; i++)
-      wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x01 + i, FALSE, sizeof(map_RxPDO[0]), map_RxPDO + i, EC_TIMEOUTSAFE);
-
+   for (int i = 0; i < number_of_mapped_Rx_objects; i++){
+      psize = sizeof(map_RxPDO[i]);
+      wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x01 + i, FALSE, psize, map_RxPDO + i, EC_TIMEOUTSAFE);
+      printf("  Wrote RxPDO mapping entry %d (1600.%02Xh) = %08Xh. psize = %d, wkc_write = %d\n", 
+         i, 0x01 + i, map_RxPDO[i], psize, wkc_write);
+      if (wkc_write <= 0)
+         printf("%s\n", ecx_elist2string(context));
+      wkc_read = ecx_SDOread(context, slave, RxPDO_INDEX, 0x01 + i, FALSE, &psize, &map_RxPDO[i], EC_TIMEOUTSAFE);
+      printf("  Read RxPDO mapping entry %d (1600.%02Xh) = %08Xh. psize = %d, wkc_read = %d\n", 
+         i, 0x01 + i, map_RxPDO[i], psize, wkc_read);
+   }
    // Set number of mapped objects to RxPDO_CONTENTS_SIZE by writing to 1600.00h
-   wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x00, FALSE, sizeof(uint8), &(uint8){RxPDO_CONTENTS_SIZE}, EC_TIMEOUTSAFE);
+   wkc_write = ecx_SDOwrite(context, slave, RxPDO_INDEX, 0x00, FALSE, sizeof(uint8), &number_of_mapped_Rx_objects, EC_TIMEOUTSAFE);
    
    // Read back RxPDO mapping (1600.00h) to verify number of mapped objects
    uint8 count = 0;
    psize = sizeof(count);
    wkc_read = ecx_SDOread(context, slave, RxPDO_INDEX, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
-   printf("  Read RxPDO (1600.00h) mapping with %d objects (expected %d). psize = %d, wkc_read = %d\n", count, (int)RxPDO_CONTENTS_SIZE, psize, wkc_read);
+   // printf("  Read RxPDO (1600.00h) mapping with %d objects (expected %d). psize = %d, wkc_read = %d\n", count, (int)RxPDO_CONTENTS_SIZE, psize, wkc_read);
+   printf("  Read RxPDO mapping (1600.00h) with %d objects. psize = %d, wkc_read = %d\n", count, psize, wkc_read);
 
    for (int i = 0; i < count; i++) {
       uint32 entry = 0;
@@ -298,26 +328,34 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    wkc_write = ecx_SDOwrite(context, slave, TxPDO_INDEX, 0x00, FALSE, sizeof(uint8), &(uint8){0}, EC_TIMEOUTSAFE);
    
    // Define new mapping entries for TxPDO (1A00h)
-   printf("  Creating map_TxPDO array with %d elements (expected 5).\n", (int)TxPDO_CONTENTS_SIZE);
-   uint32 map_TxPDO[TxPDO_CONTENTS_SIZE];
+   printf("  Creating map_TxPDO array\n");
+   uint32 map_TxPDO[8];
    map_TxPDO[0] = (STATUS_WORD_INDEX << 16) | (0x00 << 8) | 0x10;
    map_TxPDO[1] = (ACTUAL_CURRENT_INDEX << 16) | (0x00 << 8) | 0x10;
    map_TxPDO[2] = (TARGET_CURRENT_INDEX << 16) | (0x00 << 8) | 0x10;
    map_TxPDO[3] = (AI_RAW_INDEX << 16) | (AI1_RAW_SUBINDEX << 8) | 0x10;
    map_TxPDO[4] = (AI_RAW_INDEX << 16) | (AI2_RAW_SUBINDEX << 8) | 0x10;
+   map_TxPDO[5] = (AI_VALUE_INDEX << 16) | (AI1_VALUE_SUBINDEX << 8) | 0x10;
+   map_TxPDO[6] = (AI_VALUE_INDEX << 16) | (AI2_VALUE_SUBINDEX << 8) | 0x10;
+   map_TxPDO[7] = (CURRENT_VALUES_INDEX << 16) | (CURRENT_DEMAND_SUBINDEX << 8) | 0x10;
    
-   // Write mapping entries to 1A00.01h (1st application object) through 1A00.<PDO_CONTENTS_SIZE>h (last application object)
-   for (int i = 0; i < TxPDO_CONTENTS_SIZE; i++)
+   int number_of_mapped_objects = sizeof(map_TxPDO) / sizeof(map_TxPDO[0]);
+   // Write mapping entries to 1A00.01h (1st application object) through 1A00.<number_of_mapped_objects>h (last application object)
+   for (int i = 0; i < number_of_mapped_objects; i++) {
       wkc_write = ecx_SDOwrite(context, slave, TxPDO_INDEX, 0x01 + i, FALSE, (int)sizeof(uint32), map_TxPDO + i, EC_TIMEOUTSAFE);
-
+      printf("  Wrote TxPDO mapping entry %d (1600.%02Xh) = %08Xh. psize = %d, wkc_write = %d\n", 
+         i+1, 0x01 + i, map_TxPDO[i], psize, wkc_write);
+      if (wkc_write <= 0)
+         printf("%s\n", ecx_elist2string(context));
+   }
    // Set number of mapped objects to TxPDO_CONTENTS_SIZE by writing to 1A00.00h (number of mapped objects)
-   wkc_write = ecx_SDOwrite(context, slave, TxPDO_INDEX, 0x00, FALSE, 1, &(uint8){TxPDO_CONTENTS_SIZE}, EC_TIMEOUTSAFE);
+   wkc_write = ecx_SDOwrite(context, slave, TxPDO_INDEX, 0x00, FALSE, 1, &(uint8){number_of_mapped_objects}, EC_TIMEOUTSAFE);
 
    // Read back TxPDO mapping[0] (1A00.00h) to verify number of mapped objects
    count = 0;
    psize = sizeof(count);
    wkc_read = ecx_SDOread(context, slave, TxPDO_INDEX, 0x00, FALSE, &psize, &count, EC_TIMEOUTSAFE);
-   printf("  Read TxPDO (1A00.00h) mapping with %d objects (expected %d). psize = %d, wkc_read = %d\n", count, (int)TxPDO_CONTENTS_SIZE, psize, wkc_read);
+   printf("  Read TxPDO (1A00.00h) mapping with %d objects. psize = %d, wkc_read = %d\n", count, psize, wkc_read);
 
    for (int i = 0; i < count; i++) {
       uint32 entry = 0;
@@ -457,7 +495,7 @@ fieldbus_start(Fieldbus *fieldbus)
    printf("Sequential mapping of I/O... ");
    ecx_config_map_group(context, fieldbus->map, fieldbus->group);
    grp = context->grouplist + fieldbus->group;
-   printf("mapped %dO+%dI bytes (expected 4 Obytes and 10 Ibytes).\n", grp->Obytes, grp->Ibytes);
+   printf("mapped %dObytes + %dIbytes.\n", grp->Obytes, grp->Ibytes);
 
    printf("Configuring distributed clock... ");
    ecx_configdc(context);
@@ -641,24 +679,24 @@ add_timespec(struct timespec *ts, int64_t addus)
  *  Converts target and actual currents from raw values to physical Amps using KP scaling.
  *  \param fieldbus Fieldbus context (buffer and count updated)
  *  \param timestamp_s Absolute time in seconds
- *  \param target_current_A_sent Target current computed by master (before PDO encoding)
- *  \param target_current_A_received Target current read from 2010.01h via SDO (or 0.0 if not yet read)
  *  \param tx Pointer to received TxPDO data
  */
 static void
-log_sample(Fieldbus *fieldbus, double timestamp_s, double target_current_A_sent, double target_current_A_received, const tx_pdo_t *tx)
+log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx)
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
       double actual_current_A = (tx->actual_current * fieldbus->kp_amps) / DC1_SCALE;
-      double target_current_A = (tx->target_current * fieldbus->kp_amps) / DC1_SCALE;
+      double target_current_A = (tx->target_current * fieldbus->kp_amps) / DC2_SCALE;
+      double demand_current_A = (tx->demand_current * fieldbus->kp_amps) / DC1_SCALE;
       fieldbus->samples[fieldbus->sample_count].timestamp_s = timestamp_s;
       fieldbus->samples[fieldbus->sample_count].ai1_raw = tx->ai1_raw;
       fieldbus->samples[fieldbus->sample_count].ai2_raw = tx->ai2_raw;
-      // fieldbus->samples[fieldbus->sample_count].target_current_A_sent = target_current_A_sent;
-      // fieldbus->samples[fieldbus->sample_count].target_current_A_received = target_current_A_received;
       fieldbus->samples[fieldbus->sample_count].actual_current_A = actual_current_A;
+      fieldbus->samples[fieldbus->sample_count].demand_current_A = demand_current_A;
       fieldbus->samples[fieldbus->sample_count].target_current_A = target_current_A;
+      fieldbus->samples[fieldbus->sample_count].ai1_value = tx->ai1_value;
+      fieldbus->samples[fieldbus->sample_count].ai2_value = tx->ai2_value;
       fieldbus->sample_count++;
    }
 }
@@ -689,6 +727,151 @@ log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
    }
 }
 
+static void
+lookup_fault_name(uint16 drive_status_flag, uint8 subindex)
+{
+   /* This function can be expanded to decode specific drive status flags and subindices into human-readable fault names */
+   printf("  Subindex: 0x%02X, Drive Status Flag: 0x%04X\n", subindex, drive_status_flag);
+
+   // convert drive status to bitfield and print which bits are set
+   for (int bit = 0; bit < 16; bit++)
+   {
+      if (drive_status_flag & (1 << bit))
+      {
+         switch (subindex)
+         {
+            case 0x01:  /* Drive Bridge Status */
+               printf("    Drive Bridge Status: Bit %d set: ", bit);
+               switch (bit)
+               {
+                  case 0: printf("Bridge Enabled\n"); break;
+                  case 1: printf("Dynamix Brake Enabled\n"); break;
+                  case 2: printf("Stop Enabled\n"); break;
+                  case 3: printf("Positive Stop Enabled\n"); break;
+                  case 4: printf("Negative Stop Enabled\n"); break;
+                  case 5: printf("Positive Torque Inhibit Active\n"); break;
+                  case 6: printf("Negative Torque Inhibit Active\n"); break;
+                  case 7: printf("External Brake Active\n"); break;
+                  default: printf("Reserved\n"); break;  
+               }
+               break;
+            case 0x02:  /* Drive Protection Status */
+               printf("    Drive Protection Status: Bit %d set: ", bit);
+               switch (bit)
+               {
+                  case 0: printf("Drive Reset\n"); break;
+                  case 1: printf("Drive Internal Error\n"); break;
+                  case 2: printf("Short Circuit\n"); break;
+                  case 3: printf("Over Current\n"); break;
+                  case 4: printf("Under Voltage\n"); break;
+                  case 5: printf("Over Voltage\n"); break;
+                  case 6: printf("Drive Over Temperature\n"); break;
+                  default: printf("Reserved\n"); break;  
+               }
+               break;
+            case 0x03:  /* System Protection Status */
+               printf("    System Protection Status: Bit %d set: ", bit);
+               switch (bit)
+               {
+                  case 0: printf("Parameter Restore Error\n"); break;
+                  case 1: printf("Parameter Store Error\n"); break;
+                  case 2: printf("Invalid Hall State\n"); break;
+                  case 3: printf("Phase sync Error\n"); break;
+                  case 4: printf("Motor over temperature\n"); break;
+                  case 5: printf("Phase Detection Fault\n"); break;
+                  case 6: printf("Feedback Sensor Error\n"); break;
+                  case 7: printf("Motor over Speed\n"); break;
+                  case 8: printf("Max measured position\n"); break;
+                  case 9: printf("Min measured position\n"); break;
+                  case 10: printf("Comm error (node guarding)\n"); break;
+                  case 11: printf("PWM input broken wire\n"); break;
+                  case 12: printf("Motion Engine Error\n"); break;
+                  case 13: printf("Motion Engine Abort\n"); break;
+                  default: printf("Reserved\n"); break;  
+               }
+               break;
+            case 0x04:  /* Drive system status 1 */
+               printf("   Drive system status 1: Bit %d set: ", bit);
+               switch (bit)
+               {
+                  case 0: printf("Log Entry missed\n"); break;
+                  case 1: printf("Software Disable\n"); break;
+                  case 2: printf("User Disable\n"); break;
+                  case 3: printf("User Positive Inhibit\n"); break;
+                  case 4: printf("User Negative Inhibit\n"); break;
+                  case 5: printf("Current Limiting\n"); break;
+                  case 6: printf("Continuous Current Foldback\n"); break;
+                  case 7: printf("Current loop saturated\n"); break;
+                  case 8: printf("User under voltage\n"); break;
+                  case 9: printf("User over voltage\n"); break;
+                  case 10: printf("Non sinusoidal commutation\n"); break;
+                  case 11: printf("Phase detect Active\n"); break;
+                  case 12: printf("Motion Engine Active\n"); break;
+                  case 13: printf("User Auxiliary Disabled\n"); break;
+                  case 14: printf("Shunt Regulator\n"); break;
+                  case 15: printf("Phase detect done\n"); break;
+                  default: printf("Reserved\n"); break;  
+               }
+               break;
+            case 0x05:  /* Drive system status 2 */
+               printf("   Drive system status 2: Bit %d set: ", bit);
+               switch (bit)
+               {
+                  case 0: printf("Zero Velocity\n"); break;
+                  case 1: printf("At Command\n"); break;
+                  case 2: printf("Velocity Following Error\n"); break;
+                  case 3: printf("Positive target velocity limit\n"); break;
+                  case 4: printf("Negative target velocity limit\n"); break;
+                  case 5: printf("Command Limiter Active\n"); break;
+                  case 6: printf("In Home Position\n"); break;
+                  case 7: printf("Position Following Error\n"); break;
+                  case 8: printf("Max Target Position Limit\n"); break;
+                  case 9: printf("Min target position limit\n"); break;
+                  case 10: printf("Set Position\n"); break;
+                  case 11: printf("Reserved\n"); break;
+                  case 12: printf("Homing Active\n"); break;
+                  case 13: printf("Safe Torque Off Status\n"); break;
+                  case 14: printf("Homing Complete\n"); break;
+                  case 15: printf("Zero Position Error\n"); break;
+                  default: printf("Reserved\n"); break;
+               }
+               break;
+            case 0x06:  /* Drive system status 3 */
+               printf("   Drive system status 3: Bit %d set: ", bit);
+               switch (bit)
+               {
+                  case 0: printf("Reserved\n"); break;
+                  case 1: printf("Reserved\n"); break;
+                  case 2: printf("Reserved\n"); break;
+                  case 3: printf("Reserved\n"); break;
+                  case 4: printf("Reserved\n"); break;
+                  case 5: printf("Reserved\n"); break;
+                  case 6: printf("Commanded Stop\n"); break;
+                  case 7: printf("User Stop\n"); break;
+                  case 8: printf("Capture 1 active\n"); break;
+                  case 9: printf("Capture 2 active\n"); break;
+                  case 10: printf("Capture 3 active\n"); break;
+                  case 11: printf("Commanded Positive Limit\n"); break;
+                  case 12: printf("Commanded Negative Limit\n"); break;
+                  default: printf("Reserved\n"); break;  
+               }
+               break;
+            case 0x07:  /* Active Configuration Status */
+               printf("   Active Configuration Status: Bit %d set: ", bit);
+               switch (bit)
+               {
+                  case 0: printf("Absolute Position valid\n"); break;
+                  case 1: printf("Positive Stop Active\n"); break;
+                  case 2: printf("Negative Stop Active\n"); break;
+                  default: printf("Reserved\n"); break;  
+               }
+               break;
+         }
+      }
+   }
+}
+
+
 /** \brief Read diagnostic objects (2002h, 2003h, 200Fh, 2021h) via SDO after cyclic loop exits
  *  Called only when fault_detected is true, after PDO exchange has stopped.
  *  Logs each non-zero diagnostic value as FAULT_DRIVE_STATUS_FLAG with encoded detail.
@@ -714,13 +897,12 @@ read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s)
    for (sub = 0x01; sub <= 0x07; sub++)
    {
       psize = sizeof(value16);
-      if (ecx_SDOread(context, fieldbus->amc_slave_index, 0x2002, sub, FALSE, 
-                      &psize, &value16, EC_TIMEOUTSAFE) > 0 && value16 != 0)
-      {
-         printf("    .%02Xh = 0x%04X\n", sub, value16);
-         log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
-                   (0x2000 | (sub << 8) | value16), RECOVERY_NONE);
-      }
+      ecx_SDOread(context, fieldbus->amc_slave_index, 0x2002, sub, FALSE, &psize, &value16, EC_TIMEOUTSAFE);
+      // printf("    .%02Xh = 0x%04X\n", sub, value16);
+      if (value16 != 0)
+         lookup_fault_name(value16, sub);
+      // log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
+      //           (0x2000 | (sub << 8) | value16), RECOVERY_NONE);
    }
 
    /* Read 2003h.01h–.07h (Drive Status History: events that ever occurred) */
@@ -728,13 +910,11 @@ read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s)
    for (sub = 0x01; sub <= 0x07; sub++)
    {
       psize = sizeof(value16);
-      if (ecx_SDOread(context, fieldbus->amc_slave_index, 0x2003, sub, FALSE, 
-                      &psize, &value16, EC_TIMEOUTSAFE) > 0 && value16 != 0)
-      {
-         printf("    .%02Xh = 0x%04X (history)\n", sub, value16);
-         log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
-                   (0x3000 | (sub << 8) | value16), RECOVERY_NONE);
-      }
+      ecx_SDOread(context, fieldbus->amc_slave_index, 0x2003, sub, FALSE, &psize, &value16, EC_TIMEOUTSAFE);
+      printf("    .%02Xh = 0x%04X (history)\n", sub, value16);
+      lookup_fault_name(value16, sub);
+      // log_fault(fieldbus, timestamp_s, FAULT_DRIVE_STATUS_FLAG, 
+      //           (0x3000 | (sub << 8) | value16), RECOVERY_NONE);
    }
 
    /* Read 200Fh.01h (DC Bus Voltage, Integer16, DV1 units) */
@@ -795,7 +975,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    uint16_t current_state;
    boolean fault_detected = FALSE;
 
-   printf("\nStarting %.0f-second cyclic loop...\n", RUN_DURATION_S);
+   printf("\nStarting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
    
    /* Configure DC SYNC0 */
    ecx_dcsync0(context, fieldbus->amc_slave_index, TRUE, (uint32_t)cycle_ns, 0);
@@ -809,9 +989,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       target_current_A = SINE_AMPLITUDE_A * sin(sine_phase);
       
       /* Convert to raw Int32 (scale: 2^15 / KP) */
-      target_current_raw = (int32_t)round((target_current_A * 32768.0) / fieldbus->kp_amps);
-      if (target_current_raw > 32767) target_current_raw = 32767;
-      if (target_current_raw < -32768) target_current_raw = -32768;
+      target_current_raw = (int32_t)round((target_current_A * DC2_SCALE) / fieldbus->kp_amps);
+      if (target_current_raw > DC2_SCALE) target_current_raw = DC2_SCALE;  /* Saturate to max DC2 */
+      if (target_current_raw < -DC2_SCALE) target_current_raw = -DC2_SCALE;  /* Saturate to min -DC2 */
       
       rx->target_current = target_current_raw;
 
@@ -849,8 +1029,8 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          break;
       }
 
-      /* Log sample with target_current_A_received=0.0 (will be updated via SDO reads post-fault) */
-      log_sample(fieldbus, elapsed_s, target_current_A, 0.0, tx);
+      /* Log sample */
+      log_sample(fieldbus, elapsed_s, tx);
 
       /* Wait for next cycle using absolute-time sleep */
       clock_gettime(CLOCK_MONOTONIC, &now);
@@ -907,18 +1087,18 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,ai1_raw,ai2_raw\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A,ai1_raw,ai2_raw, ai1_value, ai2_value\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         // fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u\n",
-         fprintf(fp, "%.6f,%.6f,%.6f,%u,%u\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%u,%u,%d,%d\n",
                  fieldbus->samples[i].timestamp_s,
-               //   fieldbus->samples[i].target_current_A_sent,
-               //   fieldbus->samples[i].target_current_A_received,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
+                 fieldbus->samples[i].demand_current_A,
                  fieldbus->samples[i].ai1_raw,
-                 fieldbus->samples[i].ai2_raw);
+                 fieldbus->samples[i].ai2_raw,
+                 fieldbus->samples[i].ai1_value,
+                 fieldbus->samples[i].ai2_value);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);
@@ -1013,6 +1193,7 @@ int main(int argc, char *argv[])
       else
       {
          printf("ERROR: Failed to bring up CiA402 state machine\n");
+         read_drive_status_sdo(&fieldbus, 0.0);
       }
       
       /* Disable voltage and shutdown */
