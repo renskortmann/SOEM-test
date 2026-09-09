@@ -9,9 +9,10 @@
  *  \param fieldbus Fieldbus context (buffer and count updated)
  *  \param timestamp_s Absolute time in seconds
  *  \param tx Pointer to received TxPDO data
+ *  \param cycle_jitter_us Signed offset between actual and scheduled cycle time (positive = late)
  */
 void
-log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx)
+log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx, double cycle_jitter_us)
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
@@ -26,11 +27,15 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx)
       fieldbus->samples[fieldbus->sample_count].target_current_A = target_current_A;
       fieldbus->samples[fieldbus->sample_count].ai1_value = tx->ai1_value;
       fieldbus->samples[fieldbus->sample_count].ai2_value = tx->ai2_value;
+      fieldbus->samples[fieldbus->sample_count].cycle_jitter_us = cycle_jitter_us;
       fieldbus->sample_count++;
    }
 }
 
-/** \brief Record one fault event to the in-memory fault buffer and print to console
+/** \brief Record one fault event to the in-memory fault buffer
+ *  Does not print to console: this is called from inside the real-time cyclic loop, where a
+ *  blocking write syscall would add unbounded jitter right when a fault is already occurring.
+ *  Fault events are printed to console (and CSV) by export_csv() after the loop has finished.
  *  \param fieldbus Fieldbus context (fault buffer and count updated)
  *  \param timestamp_s Absolute time when fault was detected
  *  \param fault_type Category of fault (WKC_ERROR, STATE_DRIFT, etc.)
@@ -48,18 +53,15 @@ log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
       fieldbus->faults[fieldbus->fault_count].fault_detail = fault_detail;
       fieldbus->faults[fieldbus->fault_count].recovery_action = recovery_action;
       fieldbus->fault_count++;
-
-      const char *fault_name[] = {"WKC_ERROR", "ALstatuscode_CHANGE", "STATE_DRIFT", "DRIVE_STATUS_FLAG"};
-      const char *recovery_name[] = {"NONE", "AUTO_RECOVER", "SHUTDOWN_INITIATED"};
-      printf("[FAULT] t=%.3fs type=%s detail=0x%04X recovery=%s\n",
-             timestamp_s, fault_name[fault_type], fault_detail, recovery_name[recovery_action]);
    }
 }
 
-/** \brief Write sample and fault buffers to timestamped CSV files in CSV_DIR
+/** \brief Write sample and fault buffers to timestamped CSV files in CSV_DIR, and print fault events
  *  Creates two files:
- *    - voice_coil_log_YYYYMMDD_HHMMSS.csv: samples (time_s, ai1_raw, ai2_raw, actual_current_A)
+ *    - voice_coil_log_YYYYMMDD_HHMMSS.csv: samples (time_s, ai1_raw, ai2_raw, actual_current_A, cycle_jitter_us)
  *    - voice_coil_faults_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
+ *  Also prints each fault event to console (deferred from log_fault(), which cannot block on I/O
+ *  since it runs inside the real-time cyclic loop).
  *  \param fieldbus Fieldbus context with populated buffers
  */
 void
@@ -83,10 +85,10 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A,ai1_raw,ai2_raw, ai1_value, ai2_value\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A,ai1_raw,ai2_raw, ai1_value, ai2_value, cycle_jitter_us\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%u,%u,%d,%d\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%u,%u,%d,%d,%.1f\n",
                  fieldbus->samples[i].timestamp_s,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
@@ -94,7 +96,8 @@ export_csv(Fieldbus *fieldbus)
                  fieldbus->samples[i].ai1_raw,
                  fieldbus->samples[i].ai2_raw,
                  fieldbus->samples[i].ai1_value,
-                 fieldbus->samples[i].ai2_value);
+                 fieldbus->samples[i].ai2_value,
+                 fieldbus->samples[i].cycle_jitter_us);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);
@@ -104,16 +107,30 @@ export_csv(Fieldbus *fieldbus)
       printf("ERROR: Could not open %s for writing\n", sample_file);
    }
 
-   /* Write fault log */
+   /* Write fault log. Also prints each fault to console here (deferred from log_fault(),
+    * which is called from inside the real-time cyclic loop and must not block on I/O). */
+   const char *fault_names[] = {"WKC_ERROR", "ALstatuscode_CHANGE", "STATE_DRIFT", "DRIVE_STATUS_FLAG"};
+   const char *recovery_names[] = {"NONE", "AUTO_RECOVER", "SHUTDOWN_INITIATED"};
+
    snprintf(fault_file, sizeof(fault_file), "%s/voice_coil_faults_%s.csv", CSV_DIR, timestamp);
    fp = fopen(fault_file, "w");
    if (fp)
    {
       fprintf(fp, "fault_timestamp_s,fault_type,fault_detail,recovery_action\n");
-      const char *fault_names[] = {"WKC_ERROR", "ALstatuscode_CHANGE", "STATE_DRIFT", "DRIVE_STATUS_FLAG"};
-      const char *recovery_names[] = {"NONE", "AUTO_RECOVER", "SHUTDOWN_INITIATED"};
+   }
+   else
+   {
+      printf("ERROR: Could not open %s for writing\n", fault_file);
+   }
 
-      for (i = 0; i < fieldbus->fault_count; i++)
+   for (i = 0; i < fieldbus->fault_count; i++)
+   {
+      printf("[FAULT] t=%.3fs type=%s detail=0x%04X recovery=%s\n",
+             fieldbus->faults[i].timestamp_s,
+             fault_names[fieldbus->faults[i].fault_type],
+             fieldbus->faults[i].fault_detail,
+             recovery_names[fieldbus->faults[i].recovery_action]);
+      if (fp)
       {
          fprintf(fp, "%.6f,%s,0x%04X,%s\n",
                  fieldbus->faults[i].timestamp_s,
@@ -121,11 +138,11 @@ export_csv(Fieldbus *fieldbus)
                  fieldbus->faults[i].fault_detail,
                  recovery_names[fieldbus->faults[i].recovery_action]);
       }
+   }
+
+   if (fp)
+   {
       fclose(fp);
       printf("Wrote %d fault events to %s\n", fieldbus->fault_count, fault_file);
-   }
-   else
-   {
-      printf("ERROR: Could not open %s for writing\n", fault_file);
    }
 }

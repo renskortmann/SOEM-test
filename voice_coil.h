@@ -19,9 +19,11 @@
 #include <time.h>
 #include <math.h>
 #include <sys/stat.h>
-#include <sched.h>      /* sched_setscheduler, sched_get_priority_max, SCHED_FIFO */
+#include <sched.h>      /* sched_setscheduler, sched_get_priority_max, SCHED_FIFO, CPU_SET */
 #include <sys/mman.h>   /* mlockall, MCL_CURRENT, MCL_FUTURE */
 #include <errno.h>      /* strerror(errno) for error messages */
+#include <sys/prctl.h>  /* prctl, PR_SET_TIMERSLACK */
+#include <unistd.h>     /* sysconf, _SC_NPROCESSORS_ONLN */
 
 /** \brief Runtime configuration constants (modify via recompilation) */
 #define CYCLE_TIME_MS       1.0  /**< EtherCAT cycle period in milliseconds */
@@ -31,6 +33,10 @@
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 #define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
+
+/** CPU core reserved for the real-time cyclic loop. Adjust to match an isolated core
+ *  (see docs/realtime-tuning.md for the matching isolcpus= kernel boot parameter). */
+#define RT_CPU_CORE         1
 
 #define AMC_VENDOR_ID       0xBD
 #define CST_MODE            0x0A
@@ -146,6 +152,7 @@ typedef struct
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
    double target_current_A;  /**< Drive's reported target current in Amps at this timestamp (6071h, DC1) */
    double demand_current_A;  /**< Drive's reported current demand in Amps at this timestamp (2010h.02, DC1) */
+   double cycle_jitter_us;   /**< Signed offset between actual and scheduled cycle time (positive = late) */
 } sample_log_entry_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
@@ -173,7 +180,7 @@ int amc_slave_config(ecx_contextt *context, uint16 slave);
 boolean cia402_bring_up(Fieldbus *fieldbus);
 void add_timespec(struct timespec *ts, int64_t addus);
 boolean fieldbus_run_cyclic(Fieldbus *fieldbus);
-void log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx);
+void log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx, double cycle_jitter_us);
 void log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
                uint32_t fault_detail, recovery_action_t recovery_action);
 void read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s);

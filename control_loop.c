@@ -22,6 +22,11 @@ add_timespec(struct timespec *ts, int64_t addus)
 /** \brief Run the real-time control loop: generate sine-wave commands, exchange PDO, monitor faults
  *  Operates for RUN_DURATION_S seconds at CYCLE_TIME_MS intervals, synchronized via DC SYNC0.
  *  Detects WKC errors and CiA402 state drift; logs samples and faults to in-memory buffers.
+ *
+ *  No blocking I/O (printf/fprintf) happens inside the cycle loop itself: it would add
+ *  unbounded latency right when the loop needs to stay on schedule. Per-cycle timing jitter
+ *  is instead recorded into each sample (see cycle_jitter_us), and one-time error messages
+ *  are deferred to just after the loop exits.
  *  \param fieldbus Fieldbus context (sample and fault buffers populated)
  *  \return TRUE on completion (normal or fault-triggered shutdown), FALSE on internal error
  */
@@ -40,12 +45,17 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    double sine_phase;
    double target_current_A;
    int32_t target_current_raw;
+   double cycle_jitter_us;
    int wkc;
    int wkc_error_count = 0;
    int cycle_count = 0;
-   uint16_t last_statusword = 0;
    uint16_t current_state;
+   uint16_t state_drift_statusword = 0;
    boolean fault_detected = FALSE;
+   boolean wkc_threshold_exceeded = FALSE;
+   boolean state_drift_detected = FALSE;
+   int missed_deadline_count = 0;
+   double max_jitter_us = 0.0;
 
    printf("\nStarting %.0f-second cyclic loop... expected WKC: %d\n", RUN_DURATION_S, expected_wkc);
 
@@ -78,9 +88,9 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
          log_fault(fieldbus, elapsed_s, FAULT_WKC_ERROR, wkc, RECOVERY_AUTO_RECOVER);
          if (wkc_error_count > 5)
          {
-            printf("ERROR: WKC errors exceeded threshold, initiating shutdown\n");
             log_fault(fieldbus, elapsed_s, FAULT_WKC_ERROR, wkc, RECOVERY_SHUTDOWN_INITIATED);
             fault_detected = TRUE;
+            wkc_threshold_exceeded = TRUE;
             break;
          }
       }
@@ -94,24 +104,32 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       if (current_state != STATE_OPERATION_ENABLED)
       {
          log_fault(fieldbus, elapsed_s, FAULT_STATE_DRIFT, current_state, RECOVERY_SHUTDOWN_INITIATED);
-         printf("ERROR: Drive dropped out of OPERATION_ENABLED state (0x%04X), initiating shutdown\n",
-                tx->statusword);
          rx->controlword = CTRL_DISABLE_VOLT;
          fault_detected = TRUE;
+         state_drift_detected = TRUE;
+         state_drift_statusword = tx->statusword;
          break;
       }
 
+      /* Measure cycle timing jitter (actual time vs. scheduled deadline) before logging the
+       * sample, so it's captured in the same row instead of being printed live. */
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      cycle_jitter_us = (double)(now.tv_sec - next_cycle.tv_sec) * 1e6 +
+                        (double)(now.tv_nsec - next_cycle.tv_nsec) / 1000.0;
+      if (cycle_jitter_us > 0.0)
+      {
+         missed_deadline_count++;
+         if (cycle_jitter_us > max_jitter_us)
+         {
+            max_jitter_us = cycle_jitter_us;
+         }
+      }
+
       /* Log sample */
-      log_sample(fieldbus, elapsed_s, tx);
+      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us);
 
       /* Wait for next cycle using absolute-time sleep */
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      if (now.tv_sec > next_cycle.tv_sec ||
-          (now.tv_sec == next_cycle.tv_sec && now.tv_nsec > next_cycle.tv_nsec))
-      {
-         printf("WARNING: Cycle %d missed deadline\n", cycle_count);
-      }
-      else
+      if (cycle_jitter_us <= 0.0)
       {
          clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_cycle, NULL);
       }
@@ -121,7 +139,17 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       cycle_count++;
    }
 
-   printf("Cyclic loop finished. Samples: %d, Faults: %d\n", fieldbus->sample_count, fieldbus->fault_count);
+   if (wkc_threshold_exceeded)
+   {
+      printf("ERROR: WKC errors exceeded threshold, initiating shutdown\n");
+   }
+   if (state_drift_detected)
+   {
+      printf("ERROR: Drive dropped out of OPERATION_ENABLED state (0x%04X), initiating shutdown\n",
+             state_drift_statusword);
+   }
+   printf("Cyclic loop finished. Samples: %d, Faults: %d, missed deadlines: %d (max jitter %.1f us)\n",
+          fieldbus->sample_count, fieldbus->fault_count, missed_deadline_count, max_jitter_us);
 
    /* Read drive diagnostic objects via SDO after cyclic loop exits (PDO idle) */
    if (fault_detected)
