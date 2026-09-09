@@ -26,10 +26,10 @@
 #include <unistd.h>     /* sysconf, _SC_NPROCESSORS_ONLN */
 
 /** \brief Runtime configuration constants (modify via recompilation) */
-#define CYCLE_TIME_MS       1.0  /**< EtherCAT cycle period in milliseconds */
+#define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
 #define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
 #define SINE_AMPLITUDE_A    2.0  /**< Target current waveform amplitude in Amps */
-#define RUN_DURATION_S      5.0 /**< Total runtime in seconds */
+#define RUN_DURATION_S      10.0 /**< Total runtime in seconds */
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 #define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000

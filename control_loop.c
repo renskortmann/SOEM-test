@@ -63,6 +63,10 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    ecx_dcsync0(context, fieldbus->amc_slave_index, TRUE, (uint32_t)cycle_ns, 0);
 
    clock_gettime(CLOCK_MONOTONIC, &next_cycle);
+   /* Advance to the first real deadline (loop start + one cycle) before entering the loop,
+    * so cycle 0's jitter is measured against an actual deadline rather than the loop-start
+    * instant, which would always register as a spurious missed deadline. */
+   add_timespec(&next_cycle, cycle_ns / 1000);
 
    while (elapsed_s < RUN_DURATION_S)
    {
