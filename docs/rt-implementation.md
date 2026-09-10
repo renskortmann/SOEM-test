@@ -8,7 +8,7 @@ This document describes the real-time (RT) improvements made to `voice-coil` —
 
 The real-time scheduling and CPU affinity are applied in a narrow window around the cyclic loop only, not the entire program lifetime. This keeps the system from starving non-RT work during unbounded SDO configuration and CiA402 bring-up phases.
 
-**File: `voice-coil.c` `main()`**
+**File: `main.c` `main()`**
 
 - `mlockall(MCL_CURRENT | MCL_FUTURE)` is called early to lock all process memory, preventing page faults during the loop.
 - Buffers (`samples`, `faults`) are pre-allocated and prefaulted via `memset()` before entering RT mode, so the first write to each page doesn't trigger a fault.
@@ -37,7 +37,7 @@ The real-time scheduling and CPU affinity are applied in a narrow window around 
 
 Every sample now captures the signed offset between actual and scheduled cycle completion time:
 
-**File: `voice_coil.h`**
+**File: `main.h`**
 
 - `sample_log_entry_t` gains `cycle_jitter_us` (offset in microseconds; negative = early / ahead of deadline, positive = late) and `pdo_exchange_us` (see next section).
 
@@ -222,7 +222,7 @@ tail -1 data/voice_coil_log_*.csv
 
 ### On another target machine
 
-1. Edit [`voice_coil.h`](../voice_coil.h) to set `RT_CPU_CORE` to the desired isolated core.
+1. Edit [`main.h`](../main.h) to set `RT_CPU_CORE` to the desired isolated core.
 2. Follow the kernel command-line tuning in [realtime-tuning.md](realtime-tuning.md) for that machine's CPU topology.
 3. Pick the EtherCAT NIC by interrupt path (MSI + integrated bus over shared legacy IRQ), then run
    `sudo ./scripts/setup-ethercat-nic.sh --iface <IFACE> --install-service`.
@@ -238,9 +238,9 @@ sudo cyclictest -m -p 99 -i 1000 -a <RT_CPU_CORE> -t 1 -D 60
 
 ## References
 
-- **Jitter field:** [`sample_log_entry_t`](../voice_coil.h) in `voice_coil.h`
+- **Jitter field:** [`sample_log_entry_t`](../main.h) in `main.h`
 - **Loop implementation:** [`fieldbus_run_cyclic()`](../control_loop.c) in `control_loop.c`
-- **RT mode setup:** [`main()`](../voice-coil.c) in `voice-coil.c`
+- **RT mode setup:** [`main()`](../main.c) in `main.c`
 - **System tuning guide:** [realtime-tuning.md](realtime-tuning.md)
 - **Kernel boot params:** `/etc/default/grub` `GRUB_CMDLINE_LINUX_DEFAULT`
 - **Governor persistence:** `/etc/systemd/system/rt-perf.service`

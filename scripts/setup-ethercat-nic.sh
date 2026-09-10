@@ -26,7 +26,7 @@
 #                        the normal EtherCAT 100BASE-TX rate; use auto to keep
 #                        autonegotiation, e.g. through a switch that needs it)
 #   --rt-core N          RT loop core to check IRQ affinity against
-#                        (default: read RT_CPU_CORE from voice_coil.h, else 1)
+#                        (default: read RT_CPU_CORE from main.h, else 1)
 #   --install-service    Also install a systemd oneshot so the tuning is
 #                        re-applied automatically on every boot
 #   --yes                Don't prompt for confirmation
@@ -71,7 +71,7 @@ fi
 
 # Resolve the RT core (only used for the IRQ-affinity sanity check).
 if [[ -z "$RT_CORE" ]]; then
-	RT_CORE="$(grep -oP '#define\s+RT_CPU_CORE\s+\K[0-9]+' "$REPO_DIR/voice_coil.h" 2>/dev/null || true)"
+	RT_CORE="$(grep -oP '#define\s+RT_CPU_CORE\s+\K[0-9]+' "$REPO_DIR/main.h" 2>/dev/null || true)"
 	RT_CORE="${RT_CORE:-1}"
 fi
 

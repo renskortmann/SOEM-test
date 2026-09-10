@@ -2,7 +2,7 @@
  * \brief Fault diagnosis: decode status flags and read post-fault SDO diagnostics
  */
 
-#include "voice_coil.h"
+#include "main.h"
 
 static void
 lookup_fault_name(uint16 drive_status_flag, uint8 subindex)

@@ -1,12 +1,12 @@
-/** \file voice_coil.h
+/** \file main.h
  * \brief Shared types, macros, and function prototypes for voice-coil application
  *
  * Contains all common configuration constants, PDO indices, data structures,
  * and function declarations used across the modularized source files.
  */
 
-#ifndef VOICE_COIL_H
-#define VOICE_COIL_H
+#ifndef MAIN_H
+#define MAIN_H
 
 /* Enable GNU extensions and POSIX.1b features */
 #define _GNU_SOURCE
@@ -190,4 +190,4 @@ void log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
 void read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s);
 void export_csv(Fieldbus *fieldbus);
 
-#endif /* VOICE_COIL_H */
+#endif /* MAIN_H */

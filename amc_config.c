@@ -2,7 +2,7 @@
  * \brief AMC servo drive SDO configuration during PreOp→SafeOp transition
  */
 
-#include "voice_coil.h"
+#include "main.h"
 
 /** \brief Configure AMC servo drive during PreOp→SafeOp transition (PO2SOconfig hook)
  *  Sets Cyclic Synchronous Torque (CST) mode, interpolation period, PDO mappings, and reads peak current (KP).

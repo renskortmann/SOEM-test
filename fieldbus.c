@@ -2,7 +2,7 @@
  * \brief Core EtherCAT fieldbus lifecycle: initialization, network discovery, and state management
  */
 
-#include "voice_coil.h"
+#include "main.h"
 
 /** \brief Initialize Fieldbus structure with zero values and interface name
  *  \param fieldbus Pointer to Fieldbus structure to initialize

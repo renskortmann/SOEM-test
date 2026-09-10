@@ -2,7 +2,7 @@
  * \brief CiA402 state machine bring-up: progress drive through enable sequence
  */
 
-#include "voice_coil.h"
+#include "main.h"
 
 /** \brief Progress drive through CiA402 state machine to Operation Enabled
  *  Executes state transitions: Shutdown→Ready to Switch On→Switched On→Operation Enabled

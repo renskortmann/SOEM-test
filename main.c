@@ -1,14 +1,14 @@
-/** \file voice-coil.c
+/** \file main.c
  * \brief CST current-mode cyclic control + logging for AMC servo drive
  *
- * Usage: voice-coil IFNAME1
+ * Usage: ethercat-voice-coil-controller IFNAME1
  * IFNAME1 is the NIC interface name, e.g. 'eth0'
  *
  * Runs a RUN_DURATION_S-second hardware-synchronized control loop commanding
  * a sine-wave current to a voice-coil motor, logging samples and faults to CSV.
  */
 
-#include "voice_coil.h"
+#include "main.h"
 
 /** \brief Main function for the voice-coil application
  * \param argc Number of command-line arguments
@@ -23,7 +23,7 @@ int main(int argc, char *argv[])
 
    if (argc != 2)
    {
-      printf("Usage: voice-coil IFNAME\n");
+      printf("Usage: ethercat-voice-coil-controller IFNAME\n");
       printf("IFNAME is the NIC interface name, e.g. 'eth0'\n\n");
       printf("Available adapters:\n");
       adapter = ec_find_adapters();

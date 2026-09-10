@@ -2,7 +2,7 @@
  * \brief Real-time cyclic loop: sine-wave generation, PDO exchange, fault monitoring, timing
  */
 
-#include "voice_coil.h"
+#include "main.h"
 
 /** \brief Add microseconds to a struct timespec, handling nanosecond overflow
  *  \param ts Pointer to timespec to modify in-place

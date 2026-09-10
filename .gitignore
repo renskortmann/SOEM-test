@@ -5,6 +5,7 @@
 /cmake_install.cmake
 /data/
 /voice-coil
+/ethercat-voice-coil-controller
 /build
 /.venv
 __pycache__/

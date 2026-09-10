@@ -1,4 +1,4 @@
-# voice-coil
+# ethercat-voice-coil-controller
 
 An EtherCAT master application that runs a hardware-synchronized, sub-millisecond
 current-control loop on an **Advanced Motion Controls (AMC)** servo drive to command
@@ -42,12 +42,14 @@ cmake -B build
 cmake --build build
 ```
 
-This produces `build/voice-coil`.
+This produces the `ethercat-voice-coil-controller` executable in the project root
+(build artifacts stay under `build/`). If SOEM 2 is installed in a non-standard
+prefix, point CMake at it with `cmake -B build -DCMAKE_PREFIX_PATH=<install-dir>`.
 
 ## Run
 
 ```bash
-sudo ./build/voice-coil <IFNAME>      # e.g. eno1
+sudo ./ethercat-voice-coil-controller <IFNAME>      # e.g. eno1
 ```
 
 Run with no arguments to list available network interfaces. Output CSVs are written
@@ -59,7 +61,7 @@ to `data/`:
 
 ## Configuration
 
-Runtime parameters are compile-time constants in [voice_coil.h](voice_coil.h):
+Runtime parameters are compile-time constants in [main.h](main.h):
 
 | Constant | Default | Meaning |
 |---|---|---|
@@ -92,14 +94,14 @@ and the two analog inputs against a shared time axis.
 
 | File | Responsibility |
 |---|---|
-| `voice-coil.c` | `main()` — setup, RT mode entry/exit, shutdown |
+| `main.c` | `main()` — setup, RT mode entry/exit, shutdown |
 | `fieldbus.c` | EtherCAT lifecycle: init, discovery, state management |
 | `amc_config.c` | AMC drive SDO configuration (PO2SOconfig hook) |
 | `cia402.c` | CiA 402 state-machine bring-up |
 | `control_loop.c` | Real-time cyclic loop: waveform, PDO exchange, fault + timing monitoring |
 | `diagnostics.c` | Fault decoding and post-fault SDO diagnostics |
 | `logging.c` | In-memory sample/fault buffers and CSV export |
-| `voice_coil.h` | Shared types, PDO layouts, object indices, configuration constants |
+| `main.h` | Shared types, PDO layouts, object indices, configuration constants |
 
 ## Reference documentation
 

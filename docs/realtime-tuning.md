@@ -3,7 +3,7 @@
 `voice-coil` runs a 1 ms DC/SYNC0-synchronized EtherCAT cyclic loop
 (`fieldbus_run_cyclic()` in [`control_loop.c`](../control_loop.c)). The application does
 what it can on its own — `mlockall()`, prefaulted buffers, `SCHED_FIFO` + CPU affinity +
-minimal timer slack around the loop (see `main()` in [`voice-coil.c`](../voice-coil.c)) —
+minimal timer slack around the loop (see `main()` in [`main.c`](../main.c)) —
 but real-time behavior on Linux also depends on host and kernel settings this program
 cannot set for itself. This doc covers those, with concrete values for the current target
 machine.
@@ -22,7 +22,7 @@ CPU core assignment:
 | core | role |
 |---|---|
 | 0 | OS housekeeping, NIC IRQ |
-| **1** | **reserved for the RT cyclic loop** — must match `RT_CPU_CORE` in [`voice_coil.h`](../voice_coil.h) |
+| **1** | **reserved for the RT cyclic loop** — must match `RT_CPU_CORE` in [`main.h`](../main.h) |
 | 2, 3 | OS housekeeping, everything else |
 
 The application pins the cyclic loop to `RT_CPU_CORE` via `sched_setaffinity()`. That only

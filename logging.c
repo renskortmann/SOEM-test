@@ -2,7 +2,7 @@
  * \brief Sample and fault logging: in-memory buffers and CSV export
  */
 
-#include "voice_coil.h"
+#include "main.h"
 
 /** \brief Record one timestamped sample to the in-memory sample buffer
  *  Converts currents from raw values to physical Amps using KP scaling, and the analog input
