@@ -6,3 +6,5 @@
 /data/
 /voice-coil
 /build
+/.venv
+__pycache__/

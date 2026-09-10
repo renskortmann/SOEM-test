@@ -19,6 +19,18 @@ add_timespec(struct timespec *ts, int64_t addus)
    }
 }
 
+/** \brief Signed difference (end - start) between two timespecs, in microseconds
+ *  \param end Later timestamp
+ *  \param start Earlier timestamp
+ *  \return end - start in microseconds (negative if end precedes start)
+ */
+static double
+timespec_diff_us(const struct timespec *end, const struct timespec *start)
+{
+   return (double)(end->tv_sec - start->tv_sec) * 1e6 +
+          (double)(end->tv_nsec - start->tv_nsec) / 1000.0;
+}
+
 /** \brief Run the real-time control loop: generate sine-wave commands, exchange PDO, monitor faults
  *  Operates for RUN_DURATION_S seconds at CYCLE_TIME_MS intervals, synchronized via DC SYNC0.
  *  Detects WKC errors and CiA402 state drift; logs samples and faults to in-memory buffers.
@@ -39,13 +51,15 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
    tx_pdo_t *tx = (tx_pdo_t *)grp->inputs;
    int expected_wkc = grp->outputsWKC * 2 + grp->inputsWKC;
 
-   struct timespec next_cycle, now;
+   struct timespec next_cycle, now, pdo_start, pdo_end;
    int64_t cycle_ns = (int64_t)(CYCLE_TIME_MS * 1000000);
    double elapsed_s = 0.0;
    double sine_phase;
    double target_current_A;
    int32_t target_current_raw;
    double cycle_jitter_us;
+   double pdo_exchange_us;
+   double max_pdo_exchange_us = 0.0;
    int wkc;
    int wkc_error_count = 0;
    int cycle_count = 0;
@@ -81,9 +95,19 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
 
       rx->target_current = target_current_raw;
 
-      /* Send and receive process data */
+      /* Send and receive process data. Time this separately from the rest of the cycle:
+       * it's the frame round-trip (NIC driver + wire + slave + housekeeping-core IRQ servicing), so a
+       * spike here points outward at the bus/slave/host, while a spike in cycle_jitter_us
+       * without a matching pdo_exchange_us spike points at the loop thread itself. */
+      clock_gettime(CLOCK_MONOTONIC, &pdo_start);
       ecx_send_processdata(context);
       wkc = ecx_receive_processdata(context, EC_TIMEOUTRET);
+      clock_gettime(CLOCK_MONOTONIC, &pdo_end);
+      pdo_exchange_us = timespec_diff_us(&pdo_end, &pdo_start);
+      if (pdo_exchange_us > max_pdo_exchange_us)
+      {
+         max_pdo_exchange_us = pdo_exchange_us;
+      }
 
       /* Working Counter validation: detect frame loss or slave response failure */
       if (wkc < expected_wkc)
@@ -118,8 +142,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       /* Measure cycle timing jitter (actual time vs. scheduled deadline) before logging the
        * sample, so it's captured in the same row instead of being printed live. */
       clock_gettime(CLOCK_MONOTONIC, &now);
-      cycle_jitter_us = (double)(now.tv_sec - next_cycle.tv_sec) * 1e6 +
-                        (double)(now.tv_nsec - next_cycle.tv_nsec) / 1000.0;
+      cycle_jitter_us = timespec_diff_us(&now, &next_cycle);
       if (cycle_jitter_us > 0.0)
       {
          missed_deadline_count++;
@@ -130,7 +153,7 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       }
 
       /* Log sample */
-      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us);
+      log_sample(fieldbus, elapsed_s, tx, cycle_jitter_us, pdo_exchange_us);
 
       /* Wait for next cycle using absolute-time sleep */
       if (cycle_jitter_us <= 0.0)
@@ -152,8 +175,10 @@ fieldbus_run_cyclic(Fieldbus *fieldbus)
       printf("ERROR: Drive dropped out of OPERATION_ENABLED state (0x%04X), initiating shutdown\n",
              state_drift_statusword);
    }
-   printf("Cyclic loop finished. Samples: %d, Faults: %d, missed deadlines: %d (max jitter %.1f us)\n",
-          fieldbus->sample_count, fieldbus->fault_count, missed_deadline_count, max_jitter_us);
+   printf("Cyclic loop finished. Samples: %d, Faults: %d, missed deadlines: %d "
+          "(max jitter %.1f us, max PDO exchange %.1f us)\n",
+          fieldbus->sample_count, fieldbus->fault_count, missed_deadline_count,
+          max_jitter_us, max_pdo_exchange_us);
 
    /* Read drive diagnostic objects via SDO after cyclic loop exits (PDO idle) */
    if (fault_detected)

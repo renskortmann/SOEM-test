@@ -5,29 +5,35 @@
 #include "voice_coil.h"
 
 /** \brief Record one timestamped sample to the in-memory sample buffer
- *  Converts target and actual currents from raw values to physical Amps using KP scaling.
+ *  Converts currents from raw values to physical Amps using KP scaling, and the analog input
+ *  values (201Ah) from raw DAI units to physical Volts using DAI_SCALE (2^14/20).
  *  \param fieldbus Fieldbus context (buffer and count updated)
  *  \param timestamp_s Absolute time in seconds
  *  \param tx Pointer to received TxPDO data
  *  \param cycle_jitter_us Signed offset between actual and scheduled cycle time (positive = late)
+ *  \param pdo_exchange_us Time spent in send + receive processdata this cycle (frame round-trip)
  */
 void
-log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx, double cycle_jitter_us)
+log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
+           double cycle_jitter_us, double pdo_exchange_us)
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
       double actual_current_A = (tx->actual_current * fieldbus->kp_amps) / DC1_SCALE;
       double target_current_A = (tx->target_current * fieldbus->kp_amps) / DC2_SCALE;
       double demand_current_A = (tx->demand_current * fieldbus->kp_amps) / DC1_SCALE;
+      double ai1_value_V = tx->ai1_value / DAI_SCALE;
+      double ai2_value_V = tx->ai2_value / DAI_SCALE;
       fieldbus->samples[fieldbus->sample_count].timestamp_s = timestamp_s;
       fieldbus->samples[fieldbus->sample_count].ai1_raw = tx->ai1_raw;
       fieldbus->samples[fieldbus->sample_count].ai2_raw = tx->ai2_raw;
       fieldbus->samples[fieldbus->sample_count].actual_current_A = actual_current_A;
       fieldbus->samples[fieldbus->sample_count].demand_current_A = demand_current_A;
       fieldbus->samples[fieldbus->sample_count].target_current_A = target_current_A;
-      fieldbus->samples[fieldbus->sample_count].ai1_value = tx->ai1_value;
-      fieldbus->samples[fieldbus->sample_count].ai2_value = tx->ai2_value;
+      fieldbus->samples[fieldbus->sample_count].ai1_value_V = ai1_value_V;
+      fieldbus->samples[fieldbus->sample_count].ai2_value_V = ai2_value_V;
       fieldbus->samples[fieldbus->sample_count].cycle_jitter_us = cycle_jitter_us;
+      fieldbus->samples[fieldbus->sample_count].pdo_exchange_us = pdo_exchange_us;
       fieldbus->sample_count++;
    }
 }
@@ -85,19 +91,20 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A,ai1_raw,ai2_raw, ai1_value, ai2_value, cycle_jitter_us\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A,ai1_raw,ai2_raw, ai1_value_V, ai2_value_V, cycle_jitter_us, pdo_exchange_us\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%u,%u,%d,%d,%.1f\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%u,%u,%.6f,%.6f,%.1f,%.1f\n",
                  fieldbus->samples[i].timestamp_s,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
                  fieldbus->samples[i].demand_current_A,
                  fieldbus->samples[i].ai1_raw,
                  fieldbus->samples[i].ai2_raw,
-                 fieldbus->samples[i].ai1_value,
-                 fieldbus->samples[i].ai2_value,
-                 fieldbus->samples[i].cycle_jitter_us);
+                 fieldbus->samples[i].ai1_value_V,
+                 fieldbus->samples[i].ai2_value_V,
+                 fieldbus->samples[i].cycle_jitter_us,
+                 fieldbus->samples[i].pdo_exchange_us);
       }
       fclose(fp);
       printf("Wrote %d samples to %s\n", fieldbus->sample_count, sample_file);

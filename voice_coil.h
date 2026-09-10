@@ -29,7 +29,7 @@
 #define CYCLE_TIME_MS       0.5  /**< EtherCAT cycle period in milliseconds */
 #define SINE_FREQ_HZ        10.0 /**< Target current waveform frequency in Hz */
 #define SINE_AMPLITUDE_A    2.0  /**< Target current waveform amplitude in Amps */
-#define RUN_DURATION_S      10.0 /**< Total runtime in seconds */
+#define RUN_DURATION_S      30.0 /**< Total runtime in seconds */
 #define CSV_DIR             "data" /**< Output directory for CSV logs */
 #define MAX_SAMPLES         ((int)(RUN_DURATION_S / (CYCLE_TIME_MS / 1000.0)) + 100)
 #define MAX_FAULTS          1000
@@ -55,6 +55,8 @@
 
 #define DC1_SCALE          8192.0  // Scaling factor 2^13 for CiA402 DC1 current units (16-bit signed)
 #define DC2_SCALE          32768.0 // Scaling factor 2^15 for CiA402 DC2 position/velocity units (32-bit signed)
+#define DAI_SCALE          819.2   // Scaling factor 2^14/20 for AMC DAI analog-input-voltage units (201Ah);
+                                   // volts = raw / DAI_SCALE  (AMC EtherCAT Comm Manual MNCMECRF-07, Appendix A Table A.1)
 
 // PDO object indices for CiA402 current control
 #define ACTUAL_CURRENT_INDEX           0x6077    // Actual current (DC1) in 16-bit signed integer format
@@ -110,8 +112,8 @@ typedef struct OSAL_PACKED
    int16_t target_current;   /**< Desired motor current, scaled by KP (DC1 units) */
    uint16_t ai1_raw;         /**< Analog Input 1 raw ADC value (0-65535) */
    uint16_t ai2_raw;         /**< Analog Input 2 raw ADC value (0-65535) */
-   int16_t ai1_value;        /**< Analog Input 1 scaled value */
-   int16_t ai2_value;        /**< Analog Input 2 scaled value */
+   int16_t ai1_value;        /**< Analog Input 1 scaled value (201Ah, DAI units: volts = value / DAI_SCALE) */
+   int16_t ai2_value;        /**< Analog Input 2 scaled value (201Ah, DAI units: volts = value / DAI_SCALE) */
    int16_t demand_current;    /**< Current Demand from drive (DC1 units) */
 } tx_pdo_t;
 
@@ -147,12 +149,13 @@ typedef struct
    double timestamp_s;       /**< Absolute time when sample was acquired */
    uint16_t ai1_raw;         /**< Analog input 1 raw value at this timestamp */
    uint16_t ai2_raw;         /**< Analog input 2 raw value at this timestamp */
-   int16_t ai1_value;        /**< Analog input 1 scaled value at this timestamp */
-   int16_t ai2_value;        /**< Analog input 2 scaled value at this timestamp */
+   double ai1_value_V;       /**< Analog input 1 scaled value in physical Volts (201Ah, DAI) at this timestamp */
+   double ai2_value_V;       /**< Analog input 2 scaled value in physical Volts (201Ah, DAI) at this timestamp */
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
    double target_current_A;  /**< Drive's reported target current in Amps at this timestamp (6071h, DC1) */
    double demand_current_A;  /**< Drive's reported current demand in Amps at this timestamp (2010h.02, DC1) */
    double cycle_jitter_us;   /**< Signed offset between actual and scheduled cycle time (positive = late) */
+   double pdo_exchange_us;   /**< Time spent in ecx_send_processdata + ecx_receive_processdata (frame round-trip) */
 } sample_log_entry_t;
 
 /** \brief Master state container: EtherCAT protocol context, drive parameters, and sample/fault buffers */
@@ -180,7 +183,8 @@ int amc_slave_config(ecx_contextt *context, uint16 slave);
 boolean cia402_bring_up(Fieldbus *fieldbus);
 void add_timespec(struct timespec *ts, int64_t addus);
 boolean fieldbus_run_cyclic(Fieldbus *fieldbus);
-void log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx, double cycle_jitter_us);
+void log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
+                double cycle_jitter_us, double pdo_exchange_us);
 void log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
                uint32_t fault_detail, recovery_action_t recovery_action);
 void read_drive_status_sdo(Fieldbus *fieldbus, double timestamp_s);
