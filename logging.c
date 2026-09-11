@@ -21,18 +21,25 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
 {
    if (fieldbus->sample_count < MAX_SAMPLES)
    {
+      /* convert raw values to physical units using appendix A in the AMC ethercat communication manual. */
+
+      // DC1 units (Appendix A, Table A.1): amps = raw * KP / 2^13
       double actual_current_A = (tx->actual_current * fieldbus->kp_amps) / DC1_SCALE;
-      double target_current_A = (tx->target_current * fieldbus->kp_amps) / DC2_SCALE;
       double demand_current_A = (tx->demand_current * fieldbus->kp_amps) / DC1_SCALE;
+      // DC2 units (Appendix A, Table A.1): amps = raw * KP / 2^15
+      double target_current_A = (tx->target_current * fieldbus->kp_amps) / DC2_SCALE;
+      // DAI units (Appendix A, Table A.1): volts = raw / (2^14 / 20) = raw / DAI_SCALE
       double ai1_value_V = tx->ai1_value / DAI_SCALE;
       double ai2_value_V = tx->ai2_value / DAI_SCALE;
       /* DV1 units (Appendix A, Table A.1): volts = raw * 1.05 * K_OV / 2^14 */
       double dc_bus_voltage_V = tx->dc_bus_voltage_raw * 1.05 * fieldbus->kov_volts / DV1_BASE;
+
       /* Bus-referred power. Current sign reflects the drive's commutated direction for the
        * linear voice-coil actuator, not regeneration, so unsigned current is used here to
        * represent total physical energy delivered to the coil regardless of direction. */
       double power_W = dc_bus_voltage_V * fabs(actual_current_A);
 
+      // Cumulative energy delivered to the motor is computed by trapezoidal integration of power over time.
       if (fieldbus->sample_count > 0)
       {
          double prev_timestamp_s = fieldbus->samples[fieldbus->sample_count - 1].timestamp_s;
