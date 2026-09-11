@@ -5,8 +5,10 @@
 #include "main.h"
 
 /** \brief Record one timestamped sample to the in-memory sample buffer
- *  Converts currents from raw values to physical Amps using KP scaling, and the analog input
- *  values (201Ah) from raw DAI units to physical Volts using DAI_SCALE (2^14/20).
+ *  Converts currents from raw values to physical Amps using KP scaling, the analog input
+ *  values (201Ah) from raw DAI units to physical Volts using DAI_SCALE (2^14/20), and the DC
+ *  bus voltage (200Fh.01h) from raw DV1 units to physical Volts using KOV. Also computes
+ *  bus-referred instantaneous power and integrates cumulative energy delivered to the motor.
  *  \param fieldbus Fieldbus context (buffer and count updated)
  *  \param timestamp_s Absolute time in seconds
  *  \param tx Pointer to received TxPDO data
@@ -24,14 +26,30 @@ log_sample(Fieldbus *fieldbus, double timestamp_s, const tx_pdo_t *tx,
       double demand_current_A = (tx->demand_current * fieldbus->kp_amps) / DC1_SCALE;
       double ai1_value_V = tx->ai1_value / DAI_SCALE;
       double ai2_value_V = tx->ai2_value / DAI_SCALE;
+      /* DV1 units (Appendix A, Table A.1): volts = raw * 1.05 * K_OV / 2^14 */
+      double dc_bus_voltage_V = tx->dc_bus_voltage_raw * 1.05 * fieldbus->kov_volts / DV1_BASE;
+      /* Bus-referred power. Current sign reflects the drive's commutated direction for the
+       * linear voice-coil actuator, not regeneration, so unsigned current is used here to
+       * represent total physical energy delivered to the coil regardless of direction. */
+      double power_W = dc_bus_voltage_V * fabs(actual_current_A);
+
+      if (fieldbus->sample_count > 0)
+      {
+         double prev_timestamp_s = fieldbus->samples[fieldbus->sample_count - 1].timestamp_s;
+         double prev_power_W = fieldbus->samples[fieldbus->sample_count - 1].power_W;
+         double dt_s = timestamp_s - prev_timestamp_s;
+         fieldbus->cumulative_energy_J += 0.5 * (prev_power_W + power_W) * dt_s;
+      }
+
       fieldbus->samples[fieldbus->sample_count].timestamp_s = timestamp_s;
-      fieldbus->samples[fieldbus->sample_count].ai1_raw = tx->ai1_raw;
-      fieldbus->samples[fieldbus->sample_count].ai2_raw = tx->ai2_raw;
       fieldbus->samples[fieldbus->sample_count].actual_current_A = actual_current_A;
       fieldbus->samples[fieldbus->sample_count].demand_current_A = demand_current_A;
       fieldbus->samples[fieldbus->sample_count].target_current_A = target_current_A;
       fieldbus->samples[fieldbus->sample_count].ai1_value_V = ai1_value_V;
       fieldbus->samples[fieldbus->sample_count].ai2_value_V = ai2_value_V;
+      fieldbus->samples[fieldbus->sample_count].dc_bus_voltage_V = dc_bus_voltage_V;
+      fieldbus->samples[fieldbus->sample_count].power_W = power_W;
+      fieldbus->samples[fieldbus->sample_count].energy_J = fieldbus->cumulative_energy_J;
       fieldbus->samples[fieldbus->sample_count].cycle_jitter_us = cycle_jitter_us;
       fieldbus->samples[fieldbus->sample_count].pdo_exchange_us = pdo_exchange_us;
       fieldbus->sample_count++;
@@ -64,7 +82,7 @@ log_fault(Fieldbus *fieldbus, double timestamp_s, fault_type_t fault_type,
 
 /** \brief Write sample and fault buffers to timestamped CSV files in CSV_DIR, and print fault events
  *  Creates two files:
- *    - voice_coil_log_YYYYMMDD_HHMMSS.csv: samples (time_s, ai1_raw, ai2_raw, actual_current_A, cycle_jitter_us)
+ *    - voice_coil_log_YYYYMMDD_HHMMSS.csv: samples (time_s, actual_current_A, dc_bus_voltage_V, power_W, energy_J, cycle_jitter_us, ...)
  *    - voice_coil_faults_YYYYMMDD_HHMMSS.csv: fault events (timestamp, type, detail, action)
  *  Also prints each fault event to console (deferred from log_fault(), which cannot block on I/O
  *  since it runs inside the real-time cyclic loop).
@@ -91,18 +109,19 @@ export_csv(Fieldbus *fieldbus)
    fp = fopen(sample_file, "w");
    if (fp)
    {
-      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A,ai1_raw,ai2_raw, ai1_value_V, ai2_value_V, cycle_jitter_us, pdo_exchange_us\n");
+      fprintf(fp, "time_s,actual_current_A,target_current_A,demand_current_A, ai1_value_V, ai2_value_V,dc_bus_voltage_V,power_W,energy_J, cycle_jitter_us, pdo_exchange_us\n");
       for (i = 0; i < fieldbus->sample_count; i++)
       {
-         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%u,%u,%.6f,%.6f,%.1f,%.1f\n",
+         fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.1f,%.1f\n",
                  fieldbus->samples[i].timestamp_s,
                  fieldbus->samples[i].actual_current_A,
                  fieldbus->samples[i].target_current_A,
                  fieldbus->samples[i].demand_current_A,
-                 fieldbus->samples[i].ai1_raw,
-                 fieldbus->samples[i].ai2_raw,
                  fieldbus->samples[i].ai1_value_V,
                  fieldbus->samples[i].ai2_value_V,
+                 fieldbus->samples[i].dc_bus_voltage_V,
+                 fieldbus->samples[i].power_W,
+                 fieldbus->samples[i].energy_J,
                  fieldbus->samples[i].cycle_jitter_us,
                  fieldbus->samples[i].pdo_exchange_us);
       }

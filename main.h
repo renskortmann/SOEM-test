@@ -57,6 +57,8 @@
 #define DC2_SCALE          32768.0 // Scaling factor 2^15 for CiA402 DC2 position/velocity units (32-bit signed)
 #define DAI_SCALE          819.2   // Scaling factor 2^14/20 for AMC DAI analog-input-voltage units (201Ah);
                                    // volts = raw / DAI_SCALE  (AMC EtherCAT Comm Manual MNCMECRF-07, Appendix A Table A.1)
+#define PBV_SCALE          10.0    // Power Board Voltage units (20D8h): volts = raw / PBV_SCALE
+#define DV1_BASE           16384.0 // 2^14, numerator of DV1 (DC Bus Voltage) scaling factor 2^14/(1.05*K_OV)
 
 // PDO object indices for CiA402 current control
 #define ACTUAL_CURRENT_INDEX           0x6077    // Actual current (DC1) in 16-bit signed integer format
@@ -68,9 +70,9 @@
 #define STATUS_WORD_INDEX              0x6041    // StatusWord (16-bit) for CiA402 state machine
 #define MODE_OF_OPERATION_INDEX        0x6060    // Mode (16-bit) for CiA402 mode of operation
 #define INTERPOLATION_TIME_INDEX       0x60C2    // Interpolation Time Period (32-bit) for CST mode
-#define AI_RAW_INDEX                   0x2022    // Analog Input raw ADC value (16-bit unsigned)
 #define AI_VALUE_INDEX                 0x201A    // Analog Input scaled value (16-bit signed)
 #define POWER_BOARD_INFORMATION_INDEX  0x20D8 // Power Board Information (32-bit unsigned) for reading KP
+#define POWER_BRIDGE_VALUES_INDEX      0x200F // Power Bridge Values (16-bit signed) for reading DC Bus Voltage
 #define COMM_CHANNEL_ERROR_ACTION_INDEX 0x2065 // Event Action for Comm Channel Error (16-bit unsigned)
 #define SYNC_MANAGER_COMM_TYPE_INDEX   0x1C00 // Sync Manager Communication Type (8-bit unsigned)
 #define DEVICE_TYPE_INDEX              0x1000 // Device Type (32-bit unsigned) for identifying CiA402 drive
@@ -85,15 +87,15 @@
 #define EXPONENT_SUBINDEX                    0x02 // Sub-index for exponent in interpolation time period object
 #define COMM_CHANNEL_ERROR_ACTION_SUBINDEX   0x21 // Sub-index for comm channel error action object
 #define MAX_PEAK_CURRENT_SUBINDEX            0x0C // Sub-index for maximum peak current in power board information object
+#define DC_BUS_OVER_VOLTAGE_SUBINDEX         0x09 // Sub-index for DC bus over-voltage limit in power board information object
 #define VENDOR_ID_SUBINDEX                   0x01 // Sub-index for vendor ID in identity object
 #define PRODUCT_CODE_SUBINDEX                0x02 // Sub-index for product code in identity object
 #define REVISION_NUMBER_SUBINDEX             0x03 // Sub-index for revision number in identity object
 #define SERIAL_NUMBER_SUBINDEX               0x04 // Sub-index for serial number in identity object
-#define AI1_RAW_SUBINDEX                     0x01 // Sub-index for Analog Input 1 raw value
-#define AI2_RAW_SUBINDEX                     0x02 // Sub-index for Analog Input 2 raw value
 #define CURRENT_DEMAND_SUBINDEX              0x02 // Sub-index for Current Demand in the current values object
 #define AI1_VALUE_SUBINDEX                   0x01 // Sub-index for Analog Input 1 scaled value
 #define AI2_VALUE_SUBINDEX                   0x02 // Sub-index for Analog Input 2 scaled value
+#define DC_BUS_VOLTAGE_SUBINDEX              0x01 // Sub-index for DC Bus Voltage in power bridge values object
 
 /** \brief Master-to-slave process data: CiA402 ControlWord and CST target current command */
 typedef struct OSAL_PACKED
@@ -110,11 +112,10 @@ typedef struct OSAL_PACKED
    uint16_t statusword;      /**< CiA402 status bits (state machine state + fault bits) */
    int16_t actual_current;   /**< Measured motor current from drive, scaled by KP (DC1 units) */
    int16_t target_current;   /**< Desired motor current, scaled by KP (DC1 units) */
-   uint16_t ai1_raw;         /**< Analog Input 1 raw ADC value (0-65535) */
-   uint16_t ai2_raw;         /**< Analog Input 2 raw ADC value (0-65535) */
    int16_t ai1_value;        /**< Analog Input 1 scaled value (201Ah, DAI units: volts = value / DAI_SCALE) */
    int16_t ai2_value;        /**< Analog Input 2 scaled value (201Ah, DAI units: volts = value / DAI_SCALE) */
    int16_t demand_current;    /**< Current Demand from drive (DC1 units) */
+   int16_t dc_bus_voltage_raw; /**< DC Bus Voltage (200Fh.01h, DV1 units: volts = raw * 1.05 * K_OV / DV1_BASE) */
 } tx_pdo_t;
 
 /** \brief Fault categories for diagnostic logging */
@@ -147,13 +148,14 @@ typedef struct
 typedef struct
 {
    double timestamp_s;       /**< Absolute time when sample was acquired */
-   uint16_t ai1_raw;         /**< Analog input 1 raw value at this timestamp */
-   uint16_t ai2_raw;         /**< Analog input 2 raw value at this timestamp */
    double ai1_value_V;       /**< Analog input 1 scaled value in physical Volts (201Ah, DAI) at this timestamp */
    double ai2_value_V;       /**< Analog input 2 scaled value in physical Volts (201Ah, DAI) at this timestamp */
    double actual_current_A;  /**< Actual motor current in physical Amps at this timestamp */
    double target_current_A;  /**< Drive's reported target current in Amps at this timestamp (6071h, DC1) */
    double demand_current_A;  /**< Drive's reported current demand in Amps at this timestamp (2010h.02, DC1) */
+   double dc_bus_voltage_V;  /**< DC Bus Voltage in physical Volts (200Fh.01h, DV1) at this timestamp */
+   double power_W;           /**< Bus-referred electrical power: dc_bus_voltage_V * |actual_current_A| */
+   double energy_J;          /**< Cumulative energy delivered to the motor up to and including this sample */
    double cycle_jitter_us;   /**< Signed offset between actual and scheduled cycle time (positive = late) */
    double pdo_exchange_us;   /**< Time spent in ecx_send_processdata + ecx_receive_processdata (frame round-trip) */
 } sample_log_entry_t;
@@ -167,6 +169,8 @@ typedef struct
    int roundtrip_time;             /**< Last measured PDO roundtrip time in microseconds */
    uint8 map[IO_MAP_SIZE];                /**< I/O mapping buffer for ecx_config_map_group() */
    double kp_amps;                 /**< Drive peak current rating (read from object 20D8.0Ch); used for current scaling */
+   double kov_volts;               /**< DC bus over-voltage limit in volts (read from object 20D8.09h); used for DC Bus Voltage scaling */
+   double cumulative_energy_J;     /**< Running trapezoidal integral of power_W over the run, in Joules */
    uint16_t amc_slave_index;       /**< Slave index of detected AMC drive (1-based) */
    sample_log_entry_t *samples;    /**< Preallocated buffer for cyclic samples */
    int sample_count;               /**< Number of samples logged so far */

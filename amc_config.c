@@ -122,15 +122,14 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
 
    // Define new mapping entries for TxPDO (1A00h)
    printf("  Creating map_TxPDO array\n");
-   uint32 map_TxPDO[8];
+   uint32 map_TxPDO[7];
    map_TxPDO[0] = (STATUS_WORD_INDEX << 16) | (0x00 << 8) | 0x10;
    map_TxPDO[1] = (ACTUAL_CURRENT_INDEX << 16) | (0x00 << 8) | 0x10;
    map_TxPDO[2] = (TARGET_CURRENT_INDEX << 16) | (0x00 << 8) | 0x10;
-   map_TxPDO[3] = (AI_RAW_INDEX << 16) | (AI1_RAW_SUBINDEX << 8) | 0x10;
-   map_TxPDO[4] = (AI_RAW_INDEX << 16) | (AI2_RAW_SUBINDEX << 8) | 0x10;
-   map_TxPDO[5] = (AI_VALUE_INDEX << 16) | (AI1_VALUE_SUBINDEX << 8) | 0x10;
-   map_TxPDO[6] = (AI_VALUE_INDEX << 16) | (AI2_VALUE_SUBINDEX << 8) | 0x10;
-   map_TxPDO[7] = (CURRENT_VALUES_INDEX << 16) | (CURRENT_DEMAND_SUBINDEX << 8) | 0x10;
+   map_TxPDO[3] = (AI_VALUE_INDEX << 16) | (AI1_VALUE_SUBINDEX << 8) | 0x10;
+   map_TxPDO[4] = (AI_VALUE_INDEX << 16) | (AI2_VALUE_SUBINDEX << 8) | 0x10;
+   map_TxPDO[5] = (CURRENT_VALUES_INDEX << 16) | (CURRENT_DEMAND_SUBINDEX << 8) | 0x10;
+   map_TxPDO[6] = (POWER_BRIDGE_VALUES_INDEX << 16) | (DC_BUS_VOLTAGE_SUBINDEX << 8) | 0x10;
 
    int number_of_mapped_objects = sizeof(map_TxPDO) / sizeof(map_TxPDO[0]);
    // Write mapping entries to 1A00.01h (1st application object) through 1A00.<number_of_mapped_objects>h (last application object)
@@ -164,6 +163,13 @@ amc_slave_config(ecx_contextt *context, uint16 slave)
    wkc_read = ecx_SDOread(context, slave, POWER_BOARD_INFORMATION_INDEX, MAX_PEAK_CURRENT_SUBINDEX, FALSE, &psize, &kp_raw, EC_TIMEOUTSAFE);
    fieldbus->kp_amps = kp_raw / 10.0;
    printf("  Read Maximum Peak Current (KP): raw=0x%08X -> %.1f A. psize = %d, wkc_read = %d\n", kp_raw, fieldbus->kp_amps, psize, wkc_read);
+
+   /* Read DC Bus Over-Voltage limit (20D8.09h) for DC Bus Voltage scaling (K_OV) */
+   uint16 kov_raw = 0;
+   psize = sizeof(kov_raw);
+   wkc_read = ecx_SDOread(context, slave, POWER_BOARD_INFORMATION_INDEX, DC_BUS_OVER_VOLTAGE_SUBINDEX, FALSE, &psize, &kov_raw, EC_TIMEOUTSAFE);
+   fieldbus->kov_volts = kov_raw / PBV_SCALE;
+   printf("  Read DC Bus Over-Voltage limit (KOV): raw=0x%04X -> %.1f V. psize = %d, wkc_read = %d\n", kov_raw, fieldbus->kov_volts, psize, wkc_read);
 
    /* === EXPLORATORY READS: Watchdog & Synchronization Diagnostics === */
    printf("\n  Diagnostic Reads (Synchronization & Watchdog Configuration):\n");

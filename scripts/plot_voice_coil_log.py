@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Plot signals from the latest voice-coil log against time.
 
-Reads the most recent ``data/voice_coil_log_*.csv`` file and draws three
-stacked axes sharing the time axis:
+Reads the most recent ``data/voice_coil_log_*.csv`` file and draws stacked
+axes sharing the time axis:
 
-* top:    actual / target / demand current (A)  -- with show/hide checkboxes
-* middle: ai1_value
-* bottom: ai2_value
+* current (A)  -- actual / target / demand current, with show/hide checkboxes
+* ai1_value (V)
+* ai2_value (V)
+* power (W) / energy (J) -- bus-referred instantaneous power (left axis) and
+  cumulative energy delivered to the motor (right, twin axis)
 
 Usage:
     python scripts/plot_voice_coil_log.py [path/to/log.csv]
@@ -49,9 +51,18 @@ AXES = [
         False,
         {"ai2_value": (("ai2_value_V", "ai2_value"), "tab:cyan")},
     ),
+    (
+        "power (W)",
+        False,
+        {"power": ("power_W", "tab:red")},
+    ),
 ]
 
+# Plotted on a twin y-axis of the "power (W)" axis (cumulative, different scale/units).
+ENERGY_SIGNAL = {"energy": ("energy_J", "tab:purple")}
+
 ALL_SIGNALS = {label: spec for _, _, group in AXES for label, spec in group.items()}
+ALL_SIGNALS.update(ENERGY_SIGNAL)
 
 
 def latest_log() -> str:
@@ -142,6 +153,17 @@ def main() -> None:
         ax.legend(loc="upper right")
         if i == n - 1:
             ax.set_xlabel("time_s (s)")
+
+        if ylabel == "power (W)":
+            label, (column, colour) = next(iter(ENERGY_SIGNAL.items()))
+            ax_energy = ax.twinx()
+            (line,) = ax_energy.plot(
+                time_s, series[label], label=label, color=colour, lw=1.0, linestyle="--"
+            )
+            lines[label] = line
+            ax_energy.set_ylabel("energy (J)")
+            handles = [lines["power"], line]
+            ax.legend(handles=handles, loc="upper right")
 
         if has_checks:
             # Checkbox group just above this axis.
